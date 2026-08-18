@@ -2,6 +2,7 @@
 
 #include "pkm_crypto.h"
 #include "pkm_write_util.h"
+#include "za_plus.h"  // posicao do golpe no bitmap do Z-A (spec 122)
 
 namespace pk9 {
 namespace {
@@ -293,16 +294,17 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   pkw::W16(d, kHpCurrent, p.hp_current);
   pkw::W32(d, kStatus, p.status_condition);
 
-  // Plus flags do Z-A (spec 120): LIGA o bit de cada golpe pedido. Dois
-  // blocos, medidos pela sonda tools/pkhex-za2 contra o PkHeX:
-  //   id  < 256 -> 0xD6 + id/8
-  //   id >= 256 -> 0x94 + (id-256)/8
-  // Bits ja ligados no buffer original nao sao apagados.
-  for (const std::uint16_t mv : p.za_plus_moves) {
-    if (mv == 0 || mv > 359) continue;
-    const std::size_t byte = mv < 256 ? 0xD6 + mv / 8 : 0x94 + (mv - 256) / 8;
-    d[byte] = static_cast<std::uint8_t>(d[byte] | (1u << (mv % 8)));
-  }
+  // Plus flags do Z-A (specs 120/122). Duas coisas, ambas MEDIDAS contra o
+  // PkHeX (tools/pkhex-za2) depois de duas hipoteses erradas:
+  //
+  // 1. O bit NAO e indexado pelo id do golpe, e sim pela POSICAO dele na
+  //    lista PlusMoveIndexes DA ESPECIE (za_plus.h). Foi o que explicou o
+  //    Rayquaza do dono: os 13 bits que o PkHeX cobrava (7,32,93,...) sao as
+  //    posicoes dos 13 golpes do learnset dele.
+  // 2. O bitmap e sequencial a partir de 0xD6 e SALTA para 0x94 no indice
+  //    264 (medido nas bordas 263/264).
+  //
+  // (a escrita do bitmap acontece no FIM do Write — ver "plus flags do Z-A")
   d[kTeraOriginal] = p.tera_type_original;
   d[kTeraOverride] = p.tera_type_override;
 
@@ -350,6 +352,38 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   }
   for (std::size_t i = 0; i < 13 && i + 13 < p.move_record_flags.size(); ++i) {
     d[kTmFlagsDlc + i] = p.move_record_flags[13 + i];
+  }
+
+  // --- Plus flags do Legends Z-A (specs 120/122) --------------------------
+  //
+  // POR ULTIMO, de proposito: no Z-A a regiao 0x94.. guarda este bitmap, e
+  // no SV a mesma faixa e usada por outros campos. Escrever qualquer coisa
+  // depois reporia bytes por cima dos bits (medido: reapareciam os indices
+  // 264..275 e o PkHeX acusava "Multiple Plus Move flags are invalid").
+  //
+  // Duas descobertas, ambas MEDIDAS contra o PkHeX (tools/pkhex-za2) depois
+  // de duas hipoteses erradas:
+  //
+  // 1. O bit NAO e indexado pelo id do golpe, e sim pela POSICAO dele na
+  //    lista PlusMoveIndexes DA ESPECIE (za_plus.h). Foi o que explicou o
+  //    Rayquaza do dono: os 13 bits cobrados (7,32,93,...) sao as posicoes
+  //    dos 13 golpes do learnset dele.
+  // 2. O bitmap e sequencial de 0xD6 (indice 0) ate o indice 263 e SALTA
+  //    para 0x94 no indice 264 (medido nas bordas 263/264), indo ate 359.
+  //
+  // So age quando ha lista propria (za_plus_dex != 0): mover um Pokemon
+  // NATIVO do Z-A nao passa por aqui e mantem o bitmap intacto, como manda
+  // a escrita conservadora da spec 063.
+  if (p.za_plus_dex != 0) {
+    for (std::size_t i = 0xD6; i <= 0xF6; ++i) d[i] = 0;
+    for (std::size_t i = 0x94; i <= 0xA5; ++i) d[i] = 0;
+    for (const std::uint16_t mv : p.za_plus_moves) {
+      const int bit = pokehome::zaplus::BitIndex(p.za_plus_dex, mv);
+      if (bit < 0 || bit > 359) continue;  // fora da lista/do bitmap
+      const std::size_t byte =
+          bit < 264 ? 0xD6 + bit / 8 : 0x94 + (bit - 264) / 8;
+      d[byte] = static_cast<std::uint8_t>(d[byte] | (1u << (bit % 8)));
+    }
   }
 
   pkw::W16(d, kChecksum, pkc::Checksum(d, pkc::kBlockPK8));

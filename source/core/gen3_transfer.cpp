@@ -158,6 +158,42 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
   // zerado. Vale para todo destino pk9 (SV usa o mesmo campo).
   if (destino == pkm::Format::kPK9) p.obedience_level = level;
 
+  // Plus flags do Z-A (spec 122): o jogo exige a flag de CADA golpe que o
+  // Pokemon ja conhece pelo learnset ate o nivel dele — nao so dos quatro
+  // equipados. Sem elas o Z-A nao monta o registro e desenha um OVO: foi o
+  // Rayquaza nivel 100 do dono, com 13 golpes cobrados.
+  //
+  // (A spec 120 tinha descartado as flags olhando um Pidgey nivel 3, que mal
+  // aprendeu golpes e por isso tem zero — conclusao apressada, corrigida
+  // aqui contra o save real.)
+  if (dest_ms == moveset::Game::kZA) {
+    // O bit NAO e indexado pelo id do golpe: e a POSICAO dele na lista
+    // PlusMoveIndexes da especie (za_plus.h, gerado do PkHeX). Guardamos os
+    // ids aqui; o writer do pk9 traduz para o bit.
+    p.za_plus_moves.clear();
+    const learnset::Entry* e = nullptr;
+    std::size_t n = 0;
+    if (learnset::Find(learnset::Game::kZA, dex, p.form, &e, &n)) {
+      for (std::size_t i = 0; i < n; ++i) {
+        if (e[i].level == 0 || e[i].level > level) continue;
+        p.za_plus_moves.push_back(e[i].move);
+      }
+    }
+    // Os equipados so entram se JA estiverem na lista do learnset ate o
+    // nivel: ligar a flag de um golpe que o Pokemon ainda nao aprenderia
+    // produz "Multiple Plus Move flags are invalid" (medido no PkHeX).
+    for (int i = 0; i < 4; ++i) {
+      const std::uint16_t mv = p.moves[i];
+      if (!mv) continue;
+      bool ja = false;
+      for (const std::uint16_t x : p.za_plus_moves) {
+        if (x == mv) { ja = true; break; }
+      }
+      if (!ja) p.za_plus_moves.push_back(mv);
+    }
+    p.za_plus_dex = dex;  // a lista de bits e por especie
+  }
+
   // Altura e peso ABSOLUTOS (spec 121): so PA8 e PB7 os guardam, e o
   // verificador do PkHeX recalcula e compara. Formula conferida contra o
   // oraculo ate a precisao do float:

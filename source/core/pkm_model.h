@@ -111,6 +111,8 @@ struct Pokemon {
   // campo existe porque o PkHeX cobra a flag para golpes que o Pokemon
   // legitimamente conhece; nao e a causa do "Invalid Move".
   std::vector<std::uint16_t> za_plus_moves;  // [extra]
+  // Especie cuja lista PlusMoveIndexes indexa os bits acima (spec 122).
+  std::uint16_t za_plus_dex = 0;             // [extra]
   std::uint32_t palma = 0;        // [extra] PK8
   std::uint32_t form_argument = 0;     // [extra] Furfrou/Yamask/etc
   // Flags de TR/TM aprendidos (tamanho varia por formato: 14 no PK8).
