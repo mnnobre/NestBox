@@ -259,14 +259,19 @@ int main() {
       if (rec.size() == kZaRecord) {
         std::vector<std::uint8_t> dec = rec;
         pkc::Decrypt(dec.data(), dec.size(), pkc::kBlockPK8);
+        // Layout do Z-A (spec 116, medido nos nativos): nivel, 0, HP max,
+        // Atk, Def, Spe, SpA, SpD, 00 00 — SEM campo de HP atual.
         const std::uint8_t level = dec[328];
-        const std::uint16_t hp_cur =
-            static_cast<std::uint16_t>(dec[330] | (dec[331] << 8));
         const std::uint16_t hp_max =
+            static_cast<std::uint16_t>(dec[330] | (dec[331] << 8));
+        const std::uint16_t atk =
             static_cast<std::uint16_t>(dec[332] | (dec[333] << 8));
+        const std::uint16_t fim =
+            static_cast<std::uint16_t>(dec[342] | (dec[343] << 8));
         Check(level == 46, "nivel na cauda de party");
-        Check(hp_max != 0, "HP maximo calculado");
-        Check(hp_cur == hp_max, "HP atual CHEIO — nao chega desmaiado");
+        Check(hp_max > 50 && hp_max < 250, "HP maximo plausivel em 330");
+        Check(atk != 0 && atk < hp_max, "Atk em 332 (layout Z-A, nao o do SV)");
+        Check(fim == 0, "bytes finais zerados como nos nativos");
       }
     }
   }

@@ -137,10 +137,13 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
   } else {
     moveset::ResetMovesByLevel(p, dest_ms, level);
   }
-  // PP corrente: a BASE do golpe (tabela do PKHeX, spec 115) — acima disso o
-  // verify acusa "PP above the amount allowed".
+  // PP corrente: a BASE do golpe NO CONTEXTO do formato (tabela do PKHeX,
+  // spec 115) — o PLA reduz o PP de varios golpes, e acima da base o verify
+  // acusa "PP above the amount allowed".
   for (int i = 0; i < 4; ++i) {
-    p.pp[i] = p.moves[i] ? movepp::Modern(p.moves[i]) : 0;
+    p.pp[i] = p.moves[i] ? movepp::Modern(static_cast<std::uint8_t>(destino),
+                                          p.moves[i])
+                         : 0;
   }
 
   return p;

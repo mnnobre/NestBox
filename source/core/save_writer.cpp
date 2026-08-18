@@ -130,7 +130,7 @@ std::size_t CryptoBlockOf(Game g) {
 // convertido (raw vazio) — sem este preenchimento o HP atual fica 0 e o
 // Pokemon chega DESMAIADO (bug real visto pelo dono no Z-A). E o mesmo papel
 // do ResetPartyStats do PkHeX.
-void FillPartyTail16(std::uint8_t* tail, const pkm::Pokemon& mon) {
+void FillPartyTail16(std::uint8_t* tail, const pkm::Pokemon& mon, Game g) {
   const std::uint16_t dex = pkm::NationalDex(mon);
   if (dex == 0 || dex > 1025) return;
   const std::uint8_t level = pokehome::species::LevelFromExp(dex, mon.exp);
@@ -160,6 +160,14 @@ void FillPartyTail16(std::uint8_t* tail, const pkm::Pokemon& mon) {
 
   tail[0] = level;
   tail[1] = 0;
+  if (g == Game::kZA) {
+    // Z-A (spec 116, MEDIDO nos registros nativos do save real): NAO ha HP
+    // atual — nivel + 6 stats na ordem fisica + 2 bytes zero. Escrever o
+    // layout do SV aqui deslocava tudo e o jogo mostrava o Pokemon como ovo.
+    for (int i = 0; i < 6; ++i) pkw::W16(tail, 2 + 2 * i, stats[i]);
+    pkw::W16(tail, 14, 0);
+    return;
+  }
   pkw::W16(tail, 2, stats[0]);  // HP atual = HP maximo: chega inteiro
   pkw::W16(tail, 4, stats[0]);
   pkw::W16(tail, 6, stats[1]);
@@ -181,7 +189,7 @@ void PutRecord(std::uint8_t* dst, std::size_t record, Game g,
     // Nucleo sem a cauda de party (Pokemon convertido): completa (spec 113).
     const std::size_t core = rec.size();
     rec.resize(record, 0);
-    if (record - core == 16) FillPartyTail16(rec.data() + core, mon);
+    if (record - core == 16) FillPartyTail16(rec.data() + core, mon, g);
   }
   pkc::Encrypt(rec.data(), rec.size(), CryptoBlockOf(g));
   std::memcpy(dst, rec.data(), rec.size());

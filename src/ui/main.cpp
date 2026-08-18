@@ -3315,6 +3315,13 @@ struct BoxPanel {
   // sozinho; o aviso existe so para o jogador saber que algo vai mudar.
   int MissingMove(const g3::BoxPokemon& mon) const {
     if (!source || mon.empty()) return 0;
+    // Cruzando geracao o moveset e SUBSTITUIDO no commit (spec 111) — o
+    // golpe nem viaja, entao avisar que ele "nao existe no destino" e ruido
+    // (o dono viu "Dragon Rush incompativel" ao trazer de volta um Pokemon
+    // cujo moveset gen3 seria restaurado; spec 116).
+    const bool held_modern = mon.modern != nullptr;
+    if (held_modern && dynamic_cast<SaveSource*>(source)) return 0;
+    if (!held_modern && dynamic_cast<ModernSaveSource*>(source)) return 0;
     return cp::MissingMoveIn(source->GameId(), mon.moves,
                              sizeof(mon.moves) / sizeof(mon.moves[0]));
   }
