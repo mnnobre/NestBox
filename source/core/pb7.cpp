@@ -27,7 +27,7 @@ enum Off : std::size_t {
   kAvs = 36,          // so LGPE: awakening values
   kResortEventStatus = 42,
   kPokerus = 43,
-  kHeightAbsolute = 44,   // float, 4 bytes — nao entra no modelo
+  kHeightAbsolute = 44,   // 0x2C float (spec 121)
   kHeightScalar = 58,
   kWeightScalar = 59,
   kFormArgument = 60,
@@ -55,7 +55,7 @@ enum Off : std::size_t {
   kHyperTrain = 222,
   kOriginGame = 223,
   kLanguage = 227,
-  kWeightAbsolute = 228,  // float — fora do modelo
+  kWeightAbsolute = 228,  // 0xE4 float (spec 121)
   kHpCurrent = 240,  // HP atual, no NUCLEO (spec 119)
   kStatus = 232,
 };
@@ -136,6 +136,8 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.pokerus = d[kPokerus];
   p.height_scalar = d[kHeightScalar];
   p.weight_scalar = d[kWeightScalar];
+  p.height_absolute = pkw::RF32(d, kHeightAbsolute);
+  p.weight_absolute = pkw::RF32(d, kWeightAbsolute);
   p.form_argument = U32(d, kFormArgument);
 
   p.nickname = Utf16ToUtf8(d, kNickname, 12);
@@ -228,6 +230,8 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   d[kPokerus] = p.pokerus;
   d[kHeightScalar] = p.height_scalar;
   d[kWeightScalar] = p.weight_scalar;
+  pkw::WF32(d, kHeightAbsolute, p.height_absolute);
+  pkw::WF32(d, kWeightAbsolute, p.weight_absolute);
   pkw::W32(d, kFormArgument, p.form_argument);
 
   // Tamanhos proprios do PB7: 12 code units no apelido, 11 nos nomes de

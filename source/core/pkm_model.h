@@ -152,6 +152,11 @@ struct Pokemon {
   // --- Corpo (gen8+) ---------------------------------------------------
   std::uint8_t height_scalar = 0;  // [extra]
   std::uint8_t weight_scalar = 0;  // [extra]
+  // Altura/peso ABSOLUTOS (spec 121): so PA8 e PB7 os guardam, em float.
+  // O verificador do PkHeX recalcula e compara — zerado, acusa. Offsets
+  // medidos: PA8 0xAC/0xB0, PB7 0x2C/0xE4.
+  float height_absolute = 0.0f;  // [extra]
+  float weight_absolute = 0.0f;  // [extra]
   std::uint8_t scale = 0;          // [extra] PK9
 
   // --- Especificos de SwSh (PK8/PB8) ----------------------------------

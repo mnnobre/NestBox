@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,28 @@ inline void W32(std::uint8_t* d, std::size_t o, std::uint32_t v) {
   d[o + 1] = static_cast<std::uint8_t>(v >> 8);
   d[o + 2] = static_cast<std::uint8_t>(v >> 16);
   d[o + 3] = static_cast<std::uint8_t>(v >> 24);
+}
+
+// Float de 4 bytes (little-endian), como PA8/PB7 guardam altura e peso
+// absolutos (spec 121). memcpy e o unico jeito legal em C++ de reinterpretar
+// os bits sem violar aliasing.
+inline void WF32(std::uint8_t* d, std::size_t o, float v) {
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &v, 4);
+  d[o] = static_cast<std::uint8_t>(bits);
+  d[o + 1] = static_cast<std::uint8_t>(bits >> 8);
+  d[o + 2] = static_cast<std::uint8_t>(bits >> 16);
+  d[o + 3] = static_cast<std::uint8_t>(bits >> 24);
+}
+
+inline float RF32(const std::uint8_t* d, std::size_t o) {
+  const std::uint32_t bits = static_cast<std::uint32_t>(d[o]) |
+                             (static_cast<std::uint32_t>(d[o + 1]) << 8) |
+                             (static_cast<std::uint32_t>(d[o + 2]) << 16) |
+                             (static_cast<std::uint32_t>(d[o + 3]) << 24);
+  float v = 0.0f;
+  std::memcpy(&v, &bits, 4);
+  return v;
 }
 
 inline void W64(std::uint8_t* d, std::size_t o, std::uint64_t v) {

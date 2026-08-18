@@ -249,10 +249,11 @@ void CheckBodySize(const pkm::Pokemon& p, LegalityResult& r) {
   if (!pokehome::body::Lookup(table, n, dex, p.form, &base_h, &base_w)) return;
   if (base_h == 0 || base_w == 0) return;
 
-  const double fh = p.height_scalar / 255.0 * h_a + h_b;
-  const double fw = p.weight_scalar / 255.0 * 0.4 + 0.8;
-  const float calc_h = static_cast<float>(base_h * fh);
-  const float calc_w = static_cast<float>(base_w * fh * fw);
+  // Mesma funcao que o conversor usa para GRAVAR (spec 121): formulas
+  // separadas divergiriam e o verify reprovaria o que nos escrevemos.
+  float calc_h = 0.0f, calc_w = 0.0f;
+  pokehome::body::Absolutes({h_a, h_b}, base_h, base_w, p.height_scalar,
+                            p.weight_scalar, &calc_h, &calc_w);
 
   const float got_h = ReadF32(p.raw, h_off);
   const float got_w = ReadF32(p.raw, w_off);

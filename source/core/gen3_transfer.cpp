@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include "body_size.h"
 #include "move_pp.h"
 #include "pkm_convert.h"
 #include "species_facts.h"
@@ -156,6 +157,26 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
   // dois sao iguais, e o verify acusa "Invalid Obedience Level" quando fica
   // zerado. Vale para todo destino pk9 (SV usa o mesmo campo).
   if (destino == pkm::Format::kPK9) p.obedience_level = level;
+
+  // Altura e peso ABSOLUTOS (spec 121): so PA8 e PB7 os guardam, e o
+  // verificador do PkHeX recalcula e compara. Formula conferida contra o
+  // oraculo ate a precisao do float:
+  //   ratio = 0.8 + 0.4 * scalar / 255
+  //   altura = base_altura * ratio_altura
+  //   peso   = base_peso  * ratio_altura * ratio_peso
+  if (destino == pkm::Format::kPA8 || destino == pkm::Format::kPB7) {
+    const bool pla = destino == pkm::Format::kPA8;
+    const body::Entry* tab = pla ? body::kLa : body::kGg;
+    const std::size_t n =
+        pla ? sizeof(body::kLa) / sizeof(body::kLa[0])
+            : sizeof(body::kGg) / sizeof(body::kGg[0]);
+    std::uint16_t base_h = 0, base_w = 0;
+    if (body::Lookup(tab, n, dex, p.form, &base_h, &base_w) && base_h && base_w) {
+      body::Absolutes(pla ? body::kRatioPla : body::kRatioLgpe, base_h, base_w,
+                      p.height_scalar, p.weight_scalar, &p.height_absolute,
+                      &p.weight_absolute);
+    }
+  }
 
   return p;
 }

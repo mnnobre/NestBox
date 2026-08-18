@@ -48,6 +48,8 @@ enum Off : std::size_t {
   kRibbonsB = 64,          // [pkhex] 8 bytes (64..71), as marks do gen8+
   kHeight = 80,            // [ok]
   kWeight = 81,            // [ok]
+  kHeightAbsolute = 172,   // 0xAC float (spec 121)
+  kWeightAbsolute = 176,   // 0xB0 float (spec 121)
   kScale = 82,             // [ok] no PA8 o Scale do PkHeX repete o height scalar
   kMoves = 84,             // [ok] 4 x u16
   kPp = 92,                // [ok] 4 x u8
@@ -180,6 +182,8 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
 
   p.height_scalar = d[kHeight];
   p.weight_scalar = d[kWeight];
+  p.height_absolute = pkw::RF32(d, kHeightAbsolute);
+  p.weight_absolute = pkw::RF32(d, kWeightAbsolute);
   p.scale = d[kScale];
 
   p.nickname = Utf16ToUtf8(d, kNickname);
@@ -297,6 +301,8 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
 
   d[kHeight] = p.height_scalar;
   d[kWeight] = p.weight_scalar;
+  pkw::WF32(d, kHeightAbsolute, p.height_absolute);
+  pkw::WF32(d, kWeightAbsolute, p.weight_absolute);
   d[kScale] = p.scale;
 
   pkw::WriteUtf16(d, kNickname, p.nickname, 13);

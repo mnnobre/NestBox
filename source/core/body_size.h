@@ -557,4 +557,30 @@ inline bool Lookup(const Entry* table, std::size_t n, int dex, int form,
   return false;
 }
 
+// Altura e peso ABSOLUTOS a partir dos scalars (spec 121). UM lugar so: o
+// verificador de legalidade compara e o conversor grava — formulas
+// separadas divergiriam em silencio, e o verify reprovaria o que nos mesmos
+// escrevemos.
+//
+// As constantes diferem por formato (medido contra o PkHeX):
+//   PA8 (PLA):  ratio = 0.8 + 0.4 * scalar/255
+//   PB7 (LGPE): ratio = 0.6 + 0.8 * scalar/255
+// O peso escala pelos DOIS ratios (altura e peso).
+struct SizeRatio {
+  double a;  // fator do scalar
+  double b;  // base
+};
+
+inline constexpr SizeRatio kRatioPla{0.4, 0.8};
+inline constexpr SizeRatio kRatioLgpe{0.8, 0.6};
+
+inline void Absolutes(const SizeRatio& r, std::uint16_t base_h,
+                      std::uint16_t base_w, std::uint8_t height_scalar,
+                      std::uint8_t weight_scalar, float* out_h, float* out_w) {
+  const double fh = height_scalar / 255.0 * r.a + r.b;
+  const double fw = weight_scalar / 255.0 * 0.4 + 0.8;
+  if (out_h) *out_h = static_cast<float>(base_h * fh);
+  if (out_w) *out_w = static_cast<float>(base_w * fh * fw);
+}
+
 }  // namespace pokehome::body
