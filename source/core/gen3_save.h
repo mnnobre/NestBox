@@ -117,6 +117,7 @@ struct BoxPokemon {
   std::uint8_t language = 0;     // 1=JPN 2=ENG 3=FRE 4=ITA 5=GER 7=SPA ...
   std::uint8_t origin_game = 0;  // codigo do formato de origem (gen3 ou moderno)
   std::uint8_t display_gender = 0xFF;  // 0=M 1=F 2=sem sexo 0xFF=derivar (gen3)
+  std::uint8_t display_ball = 0;       // id da pokebola (spec 099); 0=desconhecida
 
   // Os 80 bytes CRUS do slot, como estao no save.
   //

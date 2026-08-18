@@ -39,6 +39,7 @@ gen3::BoxPokemon ToBoxPokemon(const pkm::Pokemon& p) {
   out.language = p.language;
   out.origin_game = p.origin_game;
   out.display_gender = p.gender;  // 0=M 1=F 2=sem sexo, mesma numeracao
+  out.display_ball = p.ball;      // spec 099
 
   for (int i = 0; i < 4; ++i) {
     out.moves[i] = p.moves[i];

@@ -4,7 +4,7 @@ project(pokehome C CXX)
 
 # Versao do app. Deve casar com a tag da release no GitHub — e o que o
 # auto-update compara. Ao publicar uma release nova, subir aqui tambem.
-set(NESTBOX_VERSION "0.8.4")
+set(NESTBOX_VERSION "0.9.0")
 # Repo publico so de releases — o codigo vive no repo privado mnnobre/NestBox.
 set(NESTBOX_REPO "mnnobre/NestBox")
 
@@ -217,6 +217,11 @@ target_compile_definitions(test_tabelas PRIVATE
   PKM_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/OpenHome/test-files/pkm-files/"
   PKHEX_JSON="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pkhex/")
 add_test(NAME tabelas COMMAND test_tabelas)
+
+# Characteristic, tipos e memo da tela de summary (spec 103).
+add_executable(test_summary_facts tests/test_summary_facts.cpp)
+target_link_libraries(test_summary_facts PRIVATE pokehome_core)
+add_test(NAME summary_facts COMMAND test_summary_facts)
 
 # Compatibilidade de golpes (spec 038) — o aviso amarelo, que NAO bloqueia.
 add_executable(test_game_moves tests/test_game_moves.cpp)

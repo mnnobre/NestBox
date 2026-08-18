@@ -59,3 +59,15 @@ save data loss is always a possibility when third-party tools touch game saves.
 
 Pokémon sprites are sourced from [PokeAPI/sprites](https://github.com/PokeAPI/sprites)
 (generation III, Emerald). The same source used by PKVault.
+
+Poké Ball item sprites (`romfs/ui/balls`) come from the same repository.
+The base stat, ability name and type tables generated into
+`source/core/gen9_base_stats.h` and `source/core/ability_names.h` are built
+from the CSV data of [PokeAPI/pokeapi](https://github.com/PokeAPI/pokeapi)
+by `tools/gen_modern_tables.py`.
+
+## Type icons
+
+Type icons (`romfs/ui/types`) are from
+[partywhale/pokemon-type-icons](https://github.com/partywhale/pokemon-type-icons),
+rasterized from the original SVGs.

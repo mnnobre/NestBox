@@ -7,10 +7,14 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "ability_names.h"
 #include "gen3_save.h"
+#include "gen9_base_stats.h"
+#include "pkm_model.h"
 
 namespace g3 = pokehome::gen3;
 
@@ -156,6 +160,8 @@ void TestPokemonDetails(const std::vector<std::uint8_t>& file) {
   Check(a->language >= 1 && a->language <= 7, "idioma na faixa do gen3");
   Check(a->origin_game >= 1 && a->origin_game <= 15,
         "jogo de origem na faixa do gen3");
+  Check(a->display_ball >= 1 && a->display_ball <= 12,
+        "pokebola na faixa do gen3 (spec 099)");
 
   // Box 1 slot 3: Lapras, spread defensivo/especial.
   const auto c = g3::ReadBoxPokemonFrom(pc, 0, 2);
@@ -267,6 +273,56 @@ void TestPersonal() {
   Check(g3::Gender(gm) == 2, "Magnemite = sem sexo");
   gm.display_gender = 1;  // fonte moderna ja resolveu: ratio e ignorado
   Check(g3::Gender(gm) == 1, "display_gender vence a derivacao");
+
+  // --- Stats de Pokemon moderno (spec 099) ---
+  //
+  // Pikachu nivel 50, IVs 31, EVs 0, natureza neutra: valores publicos
+  // conhecidos (HP 110, Atk 75, Def 60, Spe 110, SpA 70, SpD 70). Se a
+  // tabela gen9 ou a formula desandarem, isto pega.
+  {
+    auto p = std::make_shared<pkm::Pokemon>();
+    p->species = 25;
+    p->stat_nature = 0;  // Hardy: neutra
+    p->format = pkm::Format::kPK9;
+    for (int i = 0; i < 6; ++i) p->ivs[i] = 31;
+    g3::BoxPokemon vm;
+    vm.species = 25;
+    vm.national_dex = 25;
+    vm.display_level = 50;
+    vm.modern = p;
+    const g3::BattleStats st = g3::ComputeStats(vm);
+    Check(st.level == 50, "moderno: nivel 50");
+    Check(st.values[0] == 110, "Pikachu L50 HP = 110");
+    Check(st.values[1] == 75, "Pikachu L50 Atk = 75");
+    Check(st.values[2] == 60, "Pikachu L50 Def = 60");
+    Check(st.values[3] == 110, "Pikachu L50 Spe = 110");
+    Check(st.values[4] == 70, "Pikachu L50 SpA = 70");
+    Check(st.values[5] == 70, "Pikachu L50 SpD = 70");
+
+    // Natureza com mint: Adamant (3) sobe Atk e desce SpA.
+    p->stat_nature = 3;
+    const g3::BattleStats ad = g3::ComputeStats(vm);
+    Check(ad.values[1] == 82, "Adamant sobe Atk (82)");
+    Check(ad.values[4] == 63, "Adamant desce SpA (63)");
+  }
+
+  // --- Nomes de habilidade modernos (spec 099) ---
+  Check(std::string(pokehome::modern::kAbilityNames[62]) == "Guts",
+        "habilidade 62 = Guts");
+  Check(std::string(pokehome::modern::kAbilityNames[65]) == "Overgrow",
+        "habilidade 65 = Overgrow");
+  Check(std::string(pokehome::modern::kAbilityNames[1]) == "Stench",
+        "habilidade 1 = Stench");
+
+  // --- Tipos por dex para os icones (spec 099): PokeAPI 1=normal ... ---
+  Check(pokehome::modern::kTypeIds[1][0] == 12 &&
+            pokehome::modern::kTypeIds[1][1] == 4,
+        "Bulbasaur = grass/poison");
+  Check(pokehome::modern::kTypeIds[19][0] == 1 &&
+            pokehome::modern::kTypeIds[19][1] == 0,
+        "Rattata = normal, sem tipo 2");
+  Check(pokehome::modern::kTypeIds[674][0] == 2,
+        "Pancham = fighting");
 
   // Fora da faixa devolve entrada zerada, nao lixo.
   const auto oob = g3::Personal(999);

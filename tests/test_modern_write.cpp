@@ -105,6 +105,7 @@ int main() {
   Check(view.language == original.language, "idioma copiado para a view");
   Check(view.origin_game == original.origin_game, "origem copiada para a view");
   Check(view.display_gender == original.gender, "sexo copiado para a view");
+  Check(view.display_ball == original.ball, "pokebola copiada (spec 099)");
 
   bx::MoveSession session;
   const bx::SlotRef a{1, from_box, from_slot};

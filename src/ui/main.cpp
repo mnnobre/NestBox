@@ -42,6 +42,12 @@
 #include "save_backup.h"
 #include "nestbox_ab.h"
 #include "nestbox_file.h"
+#include "ability_names.h"  // nomes de habilidade modernos (spec 099)
+#include "gen9_base_stats.h"  // kTypeIds para os icones de tipo (spec 099)
+#include "item_names.h"     // nomes de item modernos (spec 103)
+#include "move_names.h"     // nome de cada golpe ate a gen9 (spec 106)
+#include "move_types.h"     // tipo de cada golpe, para os icones (spec 103)
+#include "summary_facts.h"  // characteristic e memo do summary (spec 103)
 #include "gen3_save.h"
 #include "za_save.h"
 #include "legality.h"
@@ -129,35 +135,90 @@ constexpr float kTopBarSideBlock = 240.0f;
 // Rotulo dos campos da barra de status: azulado, como na referencia.
 const NVGcolor kStatLabel = nvgRGB(0x4A, 0x8C, 0xA8);
 // Fundo da faixa de identificacao da barra de status (referencia do HOME).
-const NVGcolor kStatusHeadBg = nvgRGB(0x3B, 0xA8, 0x97);
+const NVGcolor kStatusHeadBg = nvgRGB(0x38, 0xB6, 0xAB);   // header do cartao (dono, 2026-08-17)
+const NVGcolor kStatusBodyBg = nvgRGB(0xEA, 0xF9, 0xF2);   // corpo do cartao
+const NVGcolor kStatusChipBg = nvgRGB(0xDA, 0xF3, 0xEF);   // tarja dos rotulos
 
-// Medidas fixas da caixa (spec 048). Os dois paineis sao IDENTICOS e nao
-// dependem do espaco disponivel: slot, sprite e grade tem tamanho em pixel.
+// Medidas fixas da caixa (specs 048 e 101). Os dois paineis sao IDENTICOS e
+// nao dependem do espaco disponivel: slot, sprite e grade tem tamanho em pixel.
 // Antes tudo era flex e o painel do save saia maior que o do NestBox.
-// O slot e DEITADO, nao quadrado (spec 048, rodada 2): e a proporcao do HOME,
-// e e o que faz a caixa preencher a largura da tela em vez de sobrar espaco
-// dos dois lados. A altura continua a mesma.
-constexpr float kSlotW = 81.0f;
-constexpr float kSlotH = 62.0f;
-constexpr float kSlotGapX = 12.0f;    // vao entre colunas
-constexpr float kSlotGapY = 4.0f;     // vao entre linhas
+//
+// A DERIVACAO INVERTEU na spec 101. Ate aqui o painel saia do slot
+// (kPanelWidth = kCols * (kSlotW + gap) + pad); agora o dono especificou o
+// CARTAO — 595 x 507, faixas de 60 em cima e embaixo — e o slot e 70 x 70
+// fixo. Quem sobra e o VAO, calculado do espaco que resta. Escrever assim
+// mantem o mockup como fonte da verdade: mexer no slot nao estoura o cartao,
+// so aperta ou folga o vao.
+constexpr float kPanelWidth = 595.0f;
+constexpr float kPanelHeight = 507.0f;
+constexpr float kPanelRadius = 24.0f;
+// Faixas de cima (titulo) e de baixo (rodape). Mesma altura: no mockup elas
+// sao espelho uma da outra, com o raio nos cantos externos.
+constexpr float kPanelBarHeight = 60.0f;
+constexpr float kPanelFooterHeight = 60.0f;
+// Borda de selecao. Em foco ela e desenhada para DENTRO — o cartao continua
+// 595 x 507 no total e o painel vizinho nao e empurrado (decisao do dono).
+constexpr float kPanelBorderOn = 8.0f;
+constexpr float kPanelBorderOff = 0.0f;
+
+constexpr float kPanelPad = 14.0f;
+// Slot QUADRADO (spec 101). Era deitado (81 x 62) desde a spec 048, quando a
+// largura da tela e que mandava; com o cartao especificado em pixel, o dono
+// pediu 70 x 70 e o resto virando vao.
+constexpr float kSlotW = 70.0f;
+constexpr float kSlotH = 70.0f;
 constexpr float kSpriteSize = 56.0f;  // arte do Pokemon dentro da celula
+
+// Icones de aviso do slot (spec 102). Dois quadrados de 24 x 24: o da ESQUERDA
+// avisa golpe ausente no jogo do painel, o da DIREITA avisa que o Pokemon nao
+// vai sair dali. Substituem o esmaecimento e as bordas coloridas.
+//
+// As cotas do dono medem da borda EXTERNA do slot ate a face INTERNA do
+// quadrado (a voltada para o centro), espelhadas; as verticais medem de baixo
+// ate o TOPO. Dai as contas abaixo — deixadas a vista para o proximo ajuste do
+// mockup ser uma troca de numero, nao uma reengenharia.
+//
+// O `- 10` e correcao pedida pelo dono ao ver na tela: na arte final os dois
+// ficavam baixos demais sobre o sprite. Sobe os DOIS igual, preservando os 5px
+// de desnivel entre eles que o mockup define.
+constexpr float kSlotIcon = 24.0f;
+// Golpe ausente na barra de status (spec 104): o icone amarelo fica com a
+// altura do texto (fonte 18) e pisca num ciclo continuo "bem lento" (pedido
+// do dono) — ~2,4s a 60fps. Numeros isolados para o ajuste fino da tela.
+constexpr float kMoveWarnIconSize = 18.0f;
+constexpr float kMoveWarnBlinkFrames = 144.0f;
+constexpr float kSlotIconLeftX = 22.0f - kSlotIcon;   // -2: vaza 2px a esquerda
+constexpr float kSlotIconLeftY = kSlotH - 52.0f - 10.0f;   // 8
+constexpr float kSlotIconRightX = kSlotW - 30.0f;          // 40
+constexpr float kSlotIconRightY = kSlotH - 47.0f - 10.0f;  // 13
+
+// Area util da grade: o miolo entre as duas faixas, menos o padding lateral.
+constexpr float kGridWidth = kPanelWidth - kPanelPad * 2;
+constexpr float kGridHeight =
+    kPanelHeight - kPanelBarHeight - kPanelFooterHeight;
+// Vao DERIVADO: o que sobra depois de assentar os slots, dividido igualmente.
+// Dá 24,5px na horizontal e 7,4px na vertical com a grade 6x5 de hoje.
+constexpr float kSlotGapX = (kGridWidth - kCols * kSlotW) / kCols;
+constexpr float kSlotGapY = (kGridHeight - kRows * kSlotH) / kRows;
+static_assert(kSlotGapX > 0.0f && kSlotGapY > 0.0f,
+              "a grade nao cabe no cartao: reduza o slot ou aumente o painel");
+
 // Espaco entre a barra superior da tela e o topo dos paineis.
 // 22 -80% (rodada 3) -50% (rodada 4): os cartoes encostam na barra.
 constexpr float kPanelTopGap = 2.2f;
 // Margem lateral da tela e vao entre os dois paineis.
 constexpr float kScreenSideMargin = 40.0f;
 constexpr float kPanelGap = 24.0f;
-// Derivadas: a grade e o painel saem do slot, nao do espaco disponivel.
-constexpr float kGridWidth = kCols * (kSlotW + kSlotGapX);
-constexpr float kGridHeight = kRows * (kSlotH + kSlotGapY);
-constexpr float kPanelPad = 14.0f;
-constexpr float kPanelWidth = kGridWidth + kPanelPad * 2;
 // Folga dos controles ate a borda do cabecalho (pedido do dono).
 constexpr float kHeaderSidePad = 16.0f;
 // Quadrado reservado para a logo do jogo no rodape do painel. A imagem ainda
 // nao existe como asset — o BoxFrame desenha um quadrado branco no lugar.
 constexpr float kFooterLogoBox = 46.0f;
+// Capa do jogo no rodape do cartao (spec 101): 42 x 42, raio 8. Menor que o
+// kFooterLogoBox que o LAYOUT reserva — a linha do rodape continua com 46 para
+// o numero e a pilula ficarem na mesma altura de antes.
+constexpr float kFooterCover = 42.0f;
+constexpr float kFooterCoverRadius = 8.0f;
 // Distancia entre a logo e a numeracao da caixa (pedido do dono).
 constexpr float kFooterLogoGap = 32.0f;
 
@@ -182,6 +243,13 @@ constexpr const char* kGlyphR = "";
 constexpr const char* kGlyphMinus = "";
 constexpr const char* kGlyphB = "";
 constexpr const char* kGlyphA = "";
+// X e Y seguem A/B na mesma sequencia E0E0 da fonte.
+constexpr const char* kGlyphY = "";
+
+// X segue A/B/Y na sequencia E0E0 da fonte; o + fica ao lado do − (E0F0).
+// Escapes \u para nao depender do editor renderizar a Private Use Area.
+constexpr const char* kGlyphX = "";
+constexpr const char* kGlyphPlus = "";
 
 // Marca da multissselecao (spec 021). Verde, como o cursor de selecao multipla
 // do HOME (§5 da pesquisa), e distinto do laranja do foco — os dois estados
@@ -352,6 +420,22 @@ std::string DisplaySpecies(const g3::BoxPokemon& mon) {
     if (!by_dex.empty()) return by_dex;
   }
   return g3::SpeciesName(mon.species);
+}
+
+// Nome de golpe para exibicao (spec 106). A numeracao de golpe e NACIONAL e
+// compartilhada por gen3 e modernos, entao uma tabela so cobre as duas pontas
+// — a `kMoveNames` do gen3 parava em 354 e a barra mostrava "golpe #920" para
+// tudo acima disso, que era o que o dono via.
+//
+// Vazio para golpe 0 (slot vazio) e para id fora da tabela; quem chama decide
+// o que mostrar no lugar.
+std::string DisplayMove(std::uint16_t move) {
+  if (move == 0) return "";
+  if (move < pokehome::modern::kMoveNameCount) {
+    const char* n = pokehome::modern::kMoveNames[move];
+    if (n && *n) return n;
+  }
+  return "";
 }
 
 // Existe arquivo neste caminho? Usado para o fallback do shiny: se o conjunto
@@ -789,6 +873,13 @@ class ContextMenuActivity;
 void ShowContextMenu(
     brls::Rect anchor,
     std::vector<std::pair<std::string, std::function<void()>>> items);
+
+// Check Summary do HOME (spec 103). Declarada aqui porque a ListActivity e a
+// BoxActivity a abrem e vem antes no arquivo. `source` nulo desliga a
+// navegacao L/R (tela aberta de uma lista, sem caixa em volta).
+class BoxSource;
+void ShowSummary(const g3::BoxPokemon& mon, BoxSource* source, std::size_t box,
+                 std::size_t slot);
 
 // Pergunta antes de uma acao que descarta estado (spec 020).
 //
@@ -1452,6 +1543,15 @@ class PillWithCube : public brls::Box {
     const float r = h * 0.30f;
     DrawCube(vg, x + 24.0f, y + h / 2, r);
   }
+
+  // Quem marca o foco aqui e a SETA do BoxFrame, como nas celulas — o
+  // highlight padrao do borealis fica escondido (spec 105). O callback e
+  // ligado no MakePanel, que conhece o frame.
+  std::function<void()> on_focus;
+  void onFocusGained() override {
+    brls::Box::onFocusGained();
+    if (on_focus) on_focus();
+  }
 };
 
 // --- Seletor (spec 047, cor dinamica na spec 084) ---------------------------
@@ -2021,6 +2121,53 @@ class SlotCell : public brls::Box {
     addGestureRecognizer(new brls::TapGestureRecognizer(this));
   }
 
+  // Textura dos icones do slot, cacheada por nome de arquivo. Sem cache,
+  // `nvgCreateImage` dentro do draw() criaria uma textura por quadro, para
+  // cada celula. Handle invalido tambem fica cacheado — e o que impede o
+  // nanovg de reabrir um PNG ausente a cada frame.
+  static int SlotIconHandle(NVGcontext* vg, const char* file) {
+    struct Cached {
+      std::string file;
+      int handle;
+    };
+    static std::vector<Cached> cache;
+    for (const auto& c : cache) {
+      if (c.file == file) return c.handle;
+    }
+    const int handle =
+        nvgCreateImage(vg, (std::string(POKEHOME_UI_ASSETS) + file).c_str(), 0);
+    cache.push_back({file, handle});
+    return handle;
+  }
+
+  // Os dois icones de aviso (spec 102). Desenhados no draw(), nao como Image
+  // filho: sao 24px em posicao absoluta e o da esquerda VAZA 2px do slot —
+  // como filho, o recorte do Box poderia corta-lo.
+  //
+  // A arte veio do dono e foi recortada para 24 x 24 em `romfs/ui/`. Ambos
+  // ocupam um canvas quadrado do maior lado antes de reduzir, entao os dois
+  // pesam igual no slot mesmo com silhuetas diferentes (circulo e triangulo).
+  void DrawWarnIcons(NVGcontext* vg, float x, float y) const {
+    auto icon = [&](const char* file, float ox, float oy) {
+      const int tex = SlotIconHandle(vg, file);
+      if (tex <= 0) return;
+      NVGpaint p = nvgImagePattern(vg, x + ox, y + oy, kSlotIcon, kSlotIcon, 0,
+                                   tex, 1.0f);
+      nvgBeginPath(vg);
+      nvgRect(vg, x + ox, y + oy, kSlotIcon, kSlotIcon);
+      nvgFillPaint(vg, p);
+      nvgFill(vg);
+    };
+    // Esquerda: golpe que nao existe no jogo do painel (spec 038).
+    if (warned_) icon("slot_warn.png", kSlotIconLeftX, kSlotIconLeftY);
+    // Direita: nao vai sair daqui — especie ausente no jogo (spec 034) ou
+    // reprovado pelo verificador (spec 082). Os dois compartilham o icone
+    // porque dizem a mesma coisa ao jogador (decisao do dono, spec 102).
+    if (blocked_ || suspect_) {
+      icon("slot_block.png", kSlotIconRightX, kSlotIconRightY);
+    }
+  }
+
   // Fundo do slot: circulo com a borda esfumada, desenhado antes dos filhos.
   // Radial em vez de cor de fundo por dois motivos: a celula e mais larga que
   // alta (cor de fundo viraria elipse) e a referencia nao tem aresta — o
@@ -2032,11 +2179,14 @@ class SlotCell : public brls::Box {
     const float r = std::min(w, h) * 0.5f;
 
     // Quem marca o foco e a seta do BoxFrame (rodada 5) — a celula nao muda
-    // de cor. Shiny mantem o dourado da spec 025; o vazio acompanha o estado
-    // do painel, como o corpo do cartao.
-    const NVGcolor tint = shiny_          ? kShinyBg
-                          : panel_focused_ ? kSlotTintOn
-                                           : kSlotTintOff;
+    // de cor. O fundo acompanha so o estado do PAINEL, como o corpo do cartao.
+    //
+    // O dourado de shiny (spec 025) saiu na spec 102: o sprite shiny ja tem
+    // cor propria, entao o fundo era informacao repetida. Ele tambem estava
+    // mentindo — `is_shiny()` cai no calculo gen3 (limiar 8) quando a fonte
+    // moderna nao marca `display_shiny`, e num save do Brilliant Diamond a
+    // caixa inteira aparecia dourada.
+    const NVGcolor tint = panel_focused_ ? kSlotTintOn : kSlotTintOff;
     NVGpaint p = nvgRadialGradient(vg, cx, cy, r * 0.45f, r, tint,
                                    nvgRGBAf(tint.r, tint.g, tint.b, 0.0f));
     nvgBeginPath(vg);
@@ -2072,6 +2222,10 @@ class SlotCell : public brls::Box {
     }
 
     brls::Box::draw(vg, x, y, w, h, style, ctx);
+
+    // Icones de aviso (spec 102), por cima do sprite e por baixo do veu da
+    // area: eles falam do Pokemon, e a area e um gesto que cobre tudo.
+    DrawWarnIcons(vg, x, y);
 
     // Area do modo Selecao (spec 088), DEPOIS dos filhos: o veu passa por
     // cima dos sprites, como nas capturas do HOME. Sem vao entre celulas —
@@ -2117,6 +2271,9 @@ class SlotCell : public brls::Box {
 
   void SetMon(const g3::BoxPokemon& mon) {
     const std::string path = mon.empty() ? "" : SpritePath(mon);
+    // A visao geral (spec 105) troca a interpolacao para LINEAR; o sprite de
+    // Pokemon volta ao NEAREST do pixel art.
+    sprite_->setInterpolation(brls::ImageInterpolation::NEAREST);
     if (path.empty()) {
       sprite_->setVisibility(brls::Visibility::GONE);
     } else {
@@ -2139,8 +2296,7 @@ class SlotCell : public brls::Box {
     // origem continuaria apagado depois que o bloco fosse solto (spec 088).
     origin_faded_sprite_ = false;
     sprite_->setAlpha(1.0f);
-    // O draw() le esta flag a cada quadro — nao ha fundo a repintar aqui.
-    shiny_ = !mon.empty() && mon.is_shiny();
+
   }
 
   // Sprite do Pokemon que esta na mao, na cor normal e deslocado para cima do
@@ -2208,6 +2364,17 @@ class SlotCell : public brls::Box {
     }
   }
 
+  // Visao geral das caixas (spec 105): a celula mostra UMA CAIXA, nao um
+  // Pokemon. Chamar SetMon(vazio) antes; aqui so entra a arte do cubo —
+  // ocupada (com pokebola) ou vazia (aberta). Os badges continuam pelos
+  // setters de sempre (SetBlocked/SetWarned/SetSuspect).
+  void SetBox(bool occupied) {
+    sprite_->setInterpolation(brls::ImageInterpolation::LINEAR);
+    sprite_->setImageFromFile(std::string(POKEHOME_UI_ASSETS) +
+                              (occupied ? "box_full.png" : "box_empty.png"));
+    sprite_->setVisibility(brls::Visibility::VISIBLE);
+  }
+
   // O cursor esta no painel desta celula? Muda o tom do circulo vazio.
   void SetPanelFocused(bool on) { panel_focused_ = on; }
 
@@ -2220,33 +2387,16 @@ class SlotCell : public brls::Box {
 
   // Pokemon reprovado pelo verificador de legalidade (spec 079/082).
   //
-  // Reusa o MESMO mecanismo do bloqueio por especie (spec 034) — esmaecer +
-  // borda vermelha —, e nao um segundo vocabulario visual: os dois dizem a
-  // mesma coisa ao jogador ("este nao vai sair daqui"). O que muda e a origem:
-  // aquele e do PAINEL (o que esta na mao nao cabe aqui), este e do SLOT.
+  // Compartilha o icone da DIREITA com o bloqueio por especie (spec 034), e
+  // nao um segundo vocabulario visual: os dois dizem a mesma coisa ao jogador
+  // ("este nao vai sair daqui"). O que muda e a origem: aquele e do PAINEL (o
+  // que esta na mao nao cabe aqui), este e do SLOT.
   //
-  // O "!" e provisorio e assumido: o dono pediu "por agora pode colocar algo
-  // no Pokemon ou no nome dele; depois vamos componentizar o slot da bag e ai
-  // vai ter o espaco reservado para os icones".
+  // O "!" que morava aqui saiu na spec 102 — era provisorio desde o inicio,
+  // esperando exatamente o espaco de icone que agora existe.
   void SetSuspect(bool on) {
     if (suspect_ == on) return;
     suspect_ = on;
-    if (on && !alert_) {
-      alert_ = new brls::Label();
-      alert_->setText("!");
-      alert_->setFontSize(26);
-      alert_->setTextColor(kBlocked);
-      // Sobre o sprite, no canto: POSITION_ABSOLUTE tira do fluxo do Box, que
-      // e o que impede o "!" de empurrar o sprite para o lado.
-      alert_->setPositionType(brls::PositionType::ABSOLUTE);
-      alert_->setPositionTop(4.0f);
-      alert_->setPositionRight(10.0f);
-      addView(alert_);
-    }
-    if (alert_) {
-      alert_->setVisibility(on ? brls::Visibility::VISIBLE
-                               : brls::Visibility::GONE);
-    }
     Repaint();
   }
 
@@ -2289,24 +2439,21 @@ class SlotCell : public brls::Box {
   // Precedencia, do mais forte para o mais fraco (a mesma de antes):
   // selecionado > bloqueado/suspeito (vermelho) > aviso de golpe (amarelo).
   void Repaint() {
-    // Esmaecido tanto pelo bloqueio do painel (spec 034) quanto pela
-    // reprovacao do slot (spec 082): nos dois casos ele nao vai sair daqui.
-    // A origem de um bloco levantado (spec 088) tambem esmaece, e precisa
-    // sobreviver a um Repaint — senao SetBlocked/SetWarned devolveriam o
-    // sprite para a cor cheia e a marca de "saiu daqui" sumiria.
-    sprite_->setAlpha(blocked_ || suspect_          ? 0.35f
-                      : origin_faded_sprite_ ? 0.45f
-                                             : 1.0f);
+    // Bloqueio e aviso NAO mexem mais no sprite (spec 102): quem os comunica
+    // sao os dois icones de 24px do DrawWarnIcons. Antes o sprite ia a 35% e a
+    // celula ganhava borda vermelha/amarela — o dono trocou os dois
+    // vocabularios por um so.
+    //
+    // O esmaecimento da ORIGEM sobrevive: ele nao e aviso sobre o Pokemon, e
+    // sim a marca de "este saiu daqui" enquanto o bloco esta na mao
+    // (specs 085/088).
+    sprite_->setAlpha(origin_faded_sprite_ ? 0.45f : 1.0f);
 
+    // So a SELECAO desenha borda. Ela e gesto do jogador, nao aviso — some
+    // junto com o gesto, e por isso continua (spec 021).
     if (selected_) {
       setBorderColor(kMarked);
       setBorderThickness(5.0f);
-    } else if (blocked_ || suspect_) {
-      setBorderColor(kBlocked);
-      setBorderThickness(3.0f);
-    } else if (warned_) {
-      setBorderColor(kWarned);
-      setBorderThickness(3.0f);
     } else {
       setBorderThickness(0.0f);
     }
@@ -2324,12 +2471,43 @@ class SlotCell : public brls::Box {
   bool cornerTL_ = false, cornerTR_ = false, cornerBL_ = false,
        cornerBR_ = false;
   bool selected_ = false;
-  bool shiny_ = false;
   bool panel_focused_ = false;
   bool blocked_ = false;
   bool warned_ = false;
   bool suspect_ = false;
-  brls::Label* alert_ = nullptr;  // criado sob demanda: so o suspeito o tem
+};
+
+// Icone amarelo piscando ao lado do golpe ausente na barra de status
+// (spec 104). O mesmo `slot_warn.png` do slot (spec 102), reduzido a altura
+// do texto; a textura vem do cache do SlotCell, entao as duas bocas do aviso
+// dividem um handle so.
+//
+// O piscar e um seno sobre o contador de quadros — continuo, "sumindo e
+// aparecendo bem lento", como o dono descreveu. Nao ha timer: o proprio
+// draw() avanca o tick, igual a flutuacao da seta (spec 092).
+class MoveWarnIcon : public brls::Box {
+ public:
+  MoveWarnIcon() {
+    setSize(brls::Size(kMoveWarnIconSize, kMoveWarnIconSize));
+    setVisibility(brls::Visibility::GONE);
+  }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style,
+            brls::FrameContext*) override {
+    const int tex = SlotCell::SlotIconHandle(vg, "slot_warn.png");
+    if (tex <= 0) return;
+    ++tick_;
+    const float a =
+        0.5f * (1.0f + std::sin(tick_ * 2.0f * NVG_PI / kMoveWarnBlinkFrames));
+    NVGpaint p = nvgImagePattern(vg, x, y, w, h, 0, tex, a);
+    nvgBeginPath(vg);
+    nvgRect(vg, x, y, w, h);
+    nvgFillPaint(vg, p);
+    nvgFill(vg);
+  }
+
+ private:
+  int tick_ = 0;
 };
 
 // --- Painel de caixa -------------------------------------------------------
@@ -2403,6 +2581,14 @@ class BoxFrame : public brls::Box {
   // foco; o borealis redesenha sozinho no quadro seguinte.
   void SetFocused(bool on) { focused_ = on; }
 
+  // Capa do jogo no rodape (spec 101). Quem resolve o slug e a tela — o frame
+  // so recebe o caminho pronto, porque `BoxPanel` so existe mais abaixo no
+  // arquivo. Caminho vazio = sem arte: cai no quadrado branco de antes.
+  //
+  // O handle do nanovg e criado na PRIMEIRA pintura e guardado: criar textura
+  // dentro do draw() a cada quadro vazaria uma por frame.
+  void SetCoverPath(std::string path) { cover_path_ = std::move(path); }
+
   // Cursor do HOME (spec 046, rodada 5): seta vermelha sobre a celula focada
   // e, com Pokemon no slot, a barra escura com nome e level. label vazio =
   // slot vazio = so a seta. nullptr desliga (painel sem cursor).
@@ -2426,7 +2612,7 @@ class BoxFrame : public brls::Box {
 
   void draw(NVGcontext* vg, float x, float y, float w, float h,
             brls::Style style, brls::FrameContext* ctx) override {
-    const float r = 26.0f;
+    const float r = kPanelRadius;
 
     DrawSoftShadow(vg, x, y, w, h, r);
 
@@ -2441,38 +2627,59 @@ class BoxFrame : public brls::Box {
     nvgFillColor(vg, focused_ ? kBoxBarOn : kBoxBarOff);
     nvgFill(vg);
 
-    // Filhos por cima do fundo — inclusive a grade.
-    brls::Box::draw(vg, x, y, w, h, style, ctx);
-
-    // Emblema da origem, no canto inferior direito. Depois dos filhos: ele
-    // flutua sobre o rodape, como na referencia.
-    //
-    // Quadrado branco por enquanto: a logo de cada jogo ainda nao existe como
-    // asset. Ela entra aqui quando o dono trouxer as imagens.
-    // Posicao casada com o rodape no fluxo: o painel tem kPanelPad embaixo e
-    // o rodape reserva kFooterLogoBox de altura, entao o quadrado ocupa
-    // exatamente essa faixa e o numero ao lado fica centrado nele.
-    const float em = kFooterLogoBox;
-    const float logo_x =
-        logo_left_ ? x + kPanelPad : x + w - em - kPanelPad;
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, logo_x, y + h - em - kPanelPad, em, em, 10.0f);
-    nvgFillColor(vg, kWhite);
-    nvgFill(vg);
-
-    // Borda de selecao contorna o cartao inteiro, por cima dos filhos.
+    // Borda de selecao, ANTES dos filhos (spec 101): ela contorna o cartao mas
+    // passa por BAIXO do cabecalho. Desenhada depois, ela cruzava o header e
+    // cortava a barra do titulo — o que o dono viu na conferencia.
     //
     // O raio acompanha o recuo: a borda e desenhada t/2 para DENTRO, e usar o
     // mesmo `r` do corpo dava uma curva mais aberta que a do cartao — o corpo
     // claro vazava por fora dela nos quatro cantos.
-    if (focused_) {
-      const float t = 4.0f;
+    //
+    // 8px em foco, 0 sem foco. O `t == 0` sai antes de desenhar: o nanovg com
+    // espessura zero ainda pinta um fio de meio pixel.
+    const float t = focused_ ? kPanelBorderOn : kPanelBorderOff;
+    if (t > 0.0f) {
       nvgBeginPath(vg);
       nvgRoundedRect(vg, x + t / 2, y + t / 2, w - t, h - t, r - t / 2);
       nvgStrokeColor(vg, kBoxBorderOn);
       nvgStrokeWidth(vg, t);
       nvgStroke(vg);
     }
+
+    // Filhos por cima do fundo E da borda — inclusive a grade e o cabecalho.
+    brls::Box::draw(vg, x, y, w, h, style, ctx);
+
+    // Emblema da origem, no canto externo do rodape. Depois dos filhos: ele
+    // flutua sobre o rodape, como na referencia.
+    //
+    // A CAPA do jogo (spec 101), 42 x 42 com raio 8. A esquerda e sempre o
+    // NestBox, entao a capa dali e sempre a do Pokemon HOME; a direita
+    // acompanha o save aberto. Quem resolve isso e a tela, via SetCoverPath —
+    // aqui so se pinta o que chegou.
+    //
+    // Sem arte (caminho vazio ou PNG ausente) cai no quadrado branco de antes:
+    // um buraco no rodape seria pior que o placeholder.
+    const float em = kFooterCover;
+    const float logo_x = logo_left_ ? x + kPanelPad : x + w - em - kPanelPad;
+    // Centrado na faixa do rodape (spec 101). Era `h - em - kPanelPad`, que
+    // dependia de um padding vertical que o cartao nao tem mais — a ancora
+    // agora e a propria faixa, que e quem define onde o rodape mora.
+    const float logo_y =
+        y + h - kPanelFooterHeight + (kPanelFooterHeight - em) / 2;
+
+    const int cover = CoverHandle(vg, cover_path_);
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, logo_x, logo_y, em, em, kFooterCoverRadius);
+    if (cover > 0) {
+      // O pattern cobre exatamente o quadrado do rodape: a capa e quadrada na
+      // origem, entao nao ha recorte para calcular.
+      NVGpaint p =
+          nvgImagePattern(vg, logo_x, logo_y, em, em, 0, cover, 1.0f);
+      nvgFillPaint(vg, p);
+    } else {
+      nvgFillColor(vg, kWhite);
+    }
+    nvgFill(vg);
 
     // Cursor por ultimo de tudo: seta e barra flutuam sobre qualquer coisa,
     // inclusive o cabecalho quando a celula e da primeira linha.
@@ -2483,6 +2690,29 @@ class BoxFrame : public brls::Box {
   }
 
  private:
+  // Textura da capa, cacheada por caminho — mesmo padrao do SpriteHandle.
+  // Sem cache, cada quadro criaria uma textura nova e vazaria uma por frame.
+  //
+  // LINEAR, nao NEAREST: capa e arte fotografica reduzida para 42px, e o
+  // NEAREST dos sprites (que existe para preservar o pixel-art) serrilharia.
+  //
+  // Handle <= 0 fica cacheado do mesmo jeito: e o que impede o nanovg de
+  // tentar reabrir um PNG ausente a cada quadro.
+  static int CoverHandle(NVGcontext* vg, const std::string& path) {
+    if (path.empty()) return 0;
+    struct Cached {
+      std::string path;
+      int handle;
+    };
+    static std::vector<Cached> cache;
+    for (const auto& c : cache) {
+      if (c.path == path) return c.handle;
+    }
+    const int handle = nvgCreateImage(vg, path.c_str(), 0);
+    cache.push_back({path, handle});
+    return handle;
+  }
+
   // O ponteiro do cursor: SETA normalmente, MAO quando esta segurando algo
   // (spec 093). A mao vem da mascara `selector_shape_hand.png`, tingida em
   // runtime — ela nunca virou path, so a seta virou (spec 092).
@@ -2648,6 +2878,8 @@ class BoxFrame : public brls::Box {
   float bar_height_;
   bool logo_left_ = false;
   bool focused_ = false;
+  // Capa do jogo no rodape (spec 101). Vazio ate a tela chamar SetCoverPath.
+  std::string cover_path_;
   brls::View* cursor_cell_ = nullptr;
   std::string cursor_label_;
   // Laranja e o modo Mover, o padrao ao abrir a caixa (spec 089).
@@ -2677,6 +2909,15 @@ struct BoxPanel {
   // paineis: mover e tirar de um e por no outro. nullptr = tela sem
   // movimentacao (o painel so exibe).
   bx::MoveSession* session = nullptr;
+  // Jogo do SAVE ABERTO, para os avisos em repouso (spec 104): os dois
+  // paineis comparam contra ele, nao contra a propria fonte. kCount = tela
+  // sem save (os icones de repouso ficam desligados).
+  cp::Game ref_game = cp::Game::kCount;
+  // Visao geral das caixas (spec 105): cada celula vira UMA caixa, paginada
+  // de 30 em 30. O estado e por painel — o outro continua na vista normal,
+  // como no HOME.
+  bool overview = false;
+  std::size_t ov_page = 0;
   // Coluna do foco na grade. shared_ptr porque o painel e copiado por valor.
   std::shared_ptr<std::size_t> grid_column = std::make_shared<std::size_t>(0);
   bool accent = false;
@@ -2701,6 +2942,14 @@ struct BoxPanel {
   void ShowCursor(std::size_t slot) {
     auto* frame = dynamic_cast<BoxFrame*>(root);
     if (!frame || slot >= cells.size()) return;
+    // Na visao geral o rotulo e o NOME DA CAIXA, como o tooltip escuro da
+    // referencia (spec 105).
+    if (overview) {
+      const std::size_t b = ov_page * kSlotsPerBox + slot;
+      frame->SetCursor(cells[slot],
+                       b < source->BoxCount() ? BoxName(b) : "");
+      return;
+    }
     const g3::BoxPokemon mon = Effective(slot);
     // Slot vazio = label vazio = so a seta (comportamento da referencia).
     const std::string label =
@@ -2712,12 +2961,92 @@ struct BoxPanel {
 
   // Conteudo efetivo de um slot: o overlay manda, a fonte e o fallback.
   g3::BoxPokemon Effective(std::size_t slot) const {
-    const g3::BoxPokemon original = source->At(box, slot);
+    return EffectiveAt(box, slot);
+  }
+
+  // O mesmo, para uma caixa que NAO e a aberta — a visao geral (spec 105)
+  // varre todas, e os movimentos pendentes da sessao precisam contar.
+  g3::BoxPokemon EffectiveAt(std::size_t b, std::size_t slot) const {
+    const g3::BoxPokemon original = source->At(b, slot);
     if (!session) return original;
-    return session->Get({source_id, box, slot}, original);
+    return session->Get({source_id, b, slot}, original);
+  }
+
+  std::size_t OverviewPages() const {
+    return (source->BoxCount() + kSlotsPerBox - 1) / kSlotsPerBox;
+  }
+
+  // Nome de uma caixa qualquer. Title() responde pela caixa corrente da
+  // fonte, entao aponta, le e devolve o ponteiro ao lugar.
+  std::string BoxName(std::size_t b) const {
+    source->SetCurrentBox(b);
+    std::string name = source->Title();
+    source->SetCurrentBox(box);
+    return name;
+  }
+
+  // Visao geral (spec 105): cada celula e uma caixa da pagina corrente.
+  // Cubo com pokebola = tem Pokemon; aberto = vazia. Os badges agregam os
+  // ocupantes: vermelho se ALGUM nao entra no jogo de referencia (ou foi
+  // reprovado pelo verificador), amarelo se algum so tem golpe ausente.
+  void RefreshOverview() {
+    title->setText("Box Space");
+    pill->setBackgroundColor(kWhite);
+    title->setTextColor(kTextPrimary);
+    counter->setText(std::to_string(ov_page + 1) + "/ " +
+                     std::to_string(OverviewPages()));
+
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+      cells[i]->SetMon(g3::BoxPokemon{});
+      cells[i]->SetSelected(false);
+      const std::size_t b = ov_page * kSlotsPerBox + i;
+      if (b >= source->BoxCount()) {
+        // Pagina final incompleta: celula sem caixa fica realmente vazia.
+        cells[i]->SetBlocked(false);
+        cells[i]->SetWarned(false);
+        cells[i]->SetSuspect(false);
+        continue;
+      }
+      bool occupied = false, blk = false, wrn = false, sus = false;
+      for (std::size_t s = 0; s < kSlotsPerBox; ++s) {
+        const g3::BoxPokemon m = EffectiveAt(b, s);
+        if (m.empty()) continue;
+        occupied = true;
+        if (!source->BlockedReason(b, s).empty()) sus = true;
+        if (ref_game != cp::Game::kCount) {
+          const int dex =
+              m.national_dex ? m.national_dex : g3::NationalDex(m.species);
+          if (!cp::HasSpecies(ref_game, dex)) {
+            blk = true;
+          } else if (cp::MissingMoveIn(
+                         ref_game, m.moves,
+                         sizeof(m.moves) / sizeof(m.moves[0])) != 0) {
+            wrn = true;
+          }
+        }
+      }
+      cells[i]->SetBox(occupied);
+      cells[i]->SetBlocked(blk);
+      // Mesma precedencia do slot: o motivo mais grave manda.
+      cells[i]->SetWarned(wrn && !blk && !sus);
+      cells[i]->SetSuspect(sus);
+    }
+  }
+
+  // Quantos Pokemon moram na caixa b (para o cartao da visao geral).
+  int CountIn(std::size_t b) const {
+    int n = 0;
+    for (std::size_t s = 0; s < kSlotsPerBox; ++s) {
+      if (!EffectiveAt(b, s).empty()) ++n;
+    }
+    return n;
   }
 
   void Refresh() {
+    if (overview) {
+      RefreshOverview();
+      return;
+    }
     // Antes de ler o titulo: fontes cujo nome depende da caixa (o NestBox)
     // precisam saber qual esta aberta.
     source->SetCurrentBox(box);
@@ -2744,16 +3073,34 @@ struct BoxPanel {
                         MissingMove(session->Held()) != 0;
 
     for (std::size_t i = 0; i < cells.size(); ++i) {
-      cells[i]->SetMon(Effective(i));
+      const g3::BoxPokemon eff = Effective(i);
+      cells[i]->SetMon(eff);
       cells[i]->SetSelected(session &&
                             session->IsSelected({source_id, box, i}));
-      cells[i]->SetBlocked(blocked);
-      cells[i]->SetWarned(warned);
+      // EM REPOUSO, cada slot tambem se compara contra o jogo do SAVE ABERTO
+      // (spec 104, rodada 3): especie ausente liga o icone de bloqueio, golpe
+      // ausente liga o amarelo — ANTES de o jogador pegar o Pokemon. E o que
+      // o dono descreveu na spec 102 ("o jogo que ta aberto o save"); ate
+      // aqui os icones so ligavam segurando algo.
+      bool rest_block = false, rest_warn = false;
+      if (!eff.empty() && ref_game != cp::Game::kCount) {
+        const int dex =
+            eff.national_dex ? eff.national_dex : g3::NationalDex(eff.species);
+        rest_block = !cp::HasSpecies(ref_game, dex);
+        // SEM precedencia entre os dois (pedido do dono): o mockup da spec
+        // 102 reservou as duas posicoes justamente para os icones conviverem
+        // — especie ausente E golpe ausente aparecem juntos.
+        rest_warn =
+            cp::MissingMoveIn(ref_game, eff.moves,
+                              sizeof(eff.moves) / sizeof(eff.moves[0])) != 0;
+      }
+      cells[i]->SetBlocked(blocked || rest_block);
+      cells[i]->SetWarned(warned || rest_warn);
       // Reprovado pelo verificador (spec 082). So marca se o slot ainda tem o
       // que a FONTE julgou: fontes que reprovam sao somente leitura
       // (CanAccept() == false), entao o overlay so pode esvaziar o slot —
       // nunca trocar por outro Pokemon que ninguem julgou.
-      cells[i]->SetSuspect(!Effective(i).empty() &&
+      cells[i]->SetSuspect(!eff.empty() &&
                            !source->BlockedReason(box, i).empty());
     }
   }
@@ -2780,9 +3127,37 @@ struct BoxPanel {
   }
 };
 
+// Qual arte representa este painel. O NestBox e sempre o Pokemon HOME; o
+// outro painel segue o jogo do save aberto.
+//
+// Vazio = jogo sem arte cadastrada: quem desenha cai no placeholder.
+//
+// Estava dentro da BoxActivity (spec 098, para a logo da barra de status);
+// subiu para o escopo do arquivo na spec 101, quando a capa do rodape passou a
+// precisar do mesmo slug. Uma tabela so — duas divergiriam na primeira vez que
+// um jogo novo entrasse.
+const char* PanelArtSlug(const BoxSource* source, bool is_nest) {
+  if (is_nest) return "pokemon-home";
+  if (!source) return "";
+  switch (source->GameId()) {
+    case cp::Game::kFireRed: return "pokemon-firered";
+    case cp::Game::kLeafGreen: return "pokemon-leafgreen";
+    case cp::Game::kEmerald: return "pokemon-emerald";
+    case cp::Game::kRubySapphire: return "pokemon-ruby";
+    case cp::Game::kLetsGo: return "pokemon-lets-go-pikachu";
+    case cp::Game::kSwordShield: return "pokemon-sword";
+    case cp::Game::kBdsp: return "pokemon-brilliant-diamond";
+    case cp::Game::kLegendsArceus: return "pokemon-legends-arceus";
+    case cp::Game::kScarletViolet: return "pokemon-scarlet";
+    case cp::Game::kLegendsZA: return "pokemon-legends-z-a";
+    default: return "";
+  }
+}
+
 BoxPanel MakePanel(BoxSource* source, bool accent,
                    SlotCell::FocusCallback on_focus, int source_id = 0,
-                   bx::MoveSession* session = nullptr) {
+                   bx::MoveSession* session = nullptr,
+                   std::function<void()> on_spaces = nullptr) {
   BoxPanel p;
   p.source = source;
   p.accent = accent;
@@ -2790,16 +3165,29 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   p.session = session;
 
   // Altura da barra do titulo. O cabecalho e desenhado DENTRO dela, entao os
-  // dois precisam do mesmo numero. 76 - 10% (pedido do dono).
-  constexpr float kBarHeight = 68.4f;
+  // dois precisam do mesmo numero — por isso sai da constante, e nao de um
+  // literal local (spec 101).
+  constexpr float kBarHeight = kPanelBarHeight;
 
   // Logo no canto externo: o painel de acento e o da esquerda.
   auto* frame = new BoxFrame(kBarHeight, /*logo_left=*/accent);
   p.root = frame;
+  // Capa do jogo no rodape (spec 101). `accent` E o painel do NestBox — daí a
+  // esquerda receber sempre a arte do Pokemon HOME.
+  if (const char* slug = PanelArtSlug(source, accent); *slug) {
+    frame->SetCoverPath(std::string(POKEHOME_UI_ASSETS) + "games/" + slug +
+                        "_cover.png");
+  }
   // Largura FIXA (spec 048): os dois paineis sao identicos. Com grow, o
   // painel do save saia maior que o do NestBox.
   p.root->setWidth(kPanelWidth);
-  p.root->setPadding(0, kPanelPad, kPanelPad, kPanelPad);
+  // Altura FIXA tambem (spec 101): antes o cartao crescia com o conteudo, e o
+  // mockup especifica os dois lados. Sem isto a faixa do rodape nao teria onde
+  // se apoiar — ela e desenhada a partir da BASE do cartao.
+  p.root->setHeight(kPanelHeight);
+  // Padding lateral so: as faixas de cima e de baixo ocupam a altura inteira
+  // que sobra, e um padding vertical aqui as empurraria para dentro do miolo.
+  p.root->setPadding(0, kPanelPad, 0, kPanelPad);
   // Metade do vao de cada lado: encostados, os dois somam kPanelGap.
   p.root->setMargins(0, kPanelGap / 2, 0, kPanelGap / 2);
 
@@ -2812,7 +3200,9 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   header->setJustifyContent(brls::JustifyContent::SPACE_BETWEEN);
   header->setHeight(kBarHeight);
   header->setPadding(0, kHeaderSidePad, 0, kHeaderSidePad);
-  header->setMarginBottom(4);  // 8 - 50% (pedido do dono)
+  // Sem margem embaixo (spec 101): a faixa tem 60px cravados e o miolo comeca
+  // exatamente onde ela acaba. Uma margem aqui roubaria altura da grade e o
+  // vao derivado sairia errado.
 
   // Ordem: [seta, ombro L] [pilula] [ombro R, seta] — a seta por FORA, o
   // ombro colado nela. Os dois grupos sao Box proprios: sem eles o
@@ -2839,11 +3229,11 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   // Altura fixa: sem ela o Box estica ate a altura do cabecalho e o raio
   // grande transforma a capsula numa elipse.
   p.pill = new brls::Box(brls::Axis::ROW);
-  // 70% do vao entre os dois grupos de controle. Nao e grow: com grow ela
-  // colaria neles de novo, que e justamente o que o space-between resolve.
-  p.pill->setWidth((kGridWidth - 150.0f) * 0.70f);
-  p.pill->setHeight(33.9f);  // 30.8 + 10% (pedido do dono)
-  p.pill->setCornerRadius(16.9f);
+  // 342 x 40, do mockup da spec 101. Era uma fracao do vao entre os controles;
+  // agora e medida cravada, como o resto do cartao.
+  p.pill->setWidth(342.0f);
+  p.pill->setHeight(40.0f);
+  p.pill->setCornerRadius(20.0f);  // metade da altura: pilula, nao elipse
   p.pill->setMargins(0, 10, 0, 10);
   p.pill->setJustifyContent(brls::JustifyContent::CENTER);
   p.pill->setAlignItems(brls::AlignItems::CENTER);
@@ -2905,11 +3295,13 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   // espaco no layout.
   auto* footer = new brls::Box(brls::Axis::ROW);
   footer->setAlignItems(brls::AlignItems::CENTER);
-  // Altura da logo: o quadrado e desenhado pelo BoxFrame numa posicao fixa
-  // (fora do fluxo), entao a linha precisa reservar a mesma altura para o
-  // numero e o botao ficarem centrados NELE, e nao acima.
-  footer->setHeight(kFooterLogoBox);
-  footer->setMarginTop(10);
+  // Faixa de 60px (spec 101), espelho da barra do titulo. Ela NAO tem cor
+  // propria — decisao do dono: e so o espaco reservado, e o conteudo (logo,
+  // numeracao e pilula "Espacos") fica centrado dentro dela como hoje.
+  //
+  // Era kFooterLogoBox (46) + 10 de margem; a altura agora e cravada, para o
+  // miolo da grade ser exatamente kPanelHeight menos as duas faixas.
+  footer->setHeight(kPanelFooterHeight);
 
   // Grupo logo+numero, na largura de um lado. Ele e o espelho: no painel da
   // direita a ordem interna inverte e o grupo vai para o fim da linha.
@@ -2958,6 +3350,23 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   spaces_label->setTextColor(kTextPrimary);
   spaces->addView(spaces_label);
 
+  // O botao "Espacos" E o acesso a visao geral das caixas (spec 105).
+  // Alcancavel de DOIS jeitos (dono, 2026-08-17): toque/clique direto, e
+  // pelo d-pad — descer da ultima linha da grade foca a pilula e o A ativa.
+  if (on_spaces) {
+    spaces->setFocusable(true);
+    // A seta do painel aponta para a pilula, como faz com as celulas — sem
+    // a borda de highlight do borealis (dono, 2026-08-17).
+    spaces->setHideHighlight(true);
+    spaces->on_focus = [frame, spaces] { frame->SetCursor(spaces, ""); };
+    spaces->registerClickAction([on_spaces](brls::View*) {
+      on_spaces();
+      return true;
+    });
+    // O tap dispara a mesma click action registrada acima.
+    spaces->addGestureRecognizer(new brls::TapGestureRecognizer(spaces));
+  }
+
   // Espacadores: grow(1) nos dois vaos, mais um bloco VAZIO do outro lado
   // com a largura do `info`. Sem ele o lado sem logo seria maior e o botao
   // sairia do centro do cartao.
@@ -2990,286 +3399,6 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   p.root->addView(footer);
   return p;
 }
-
-// --- Tela de detalhes ------------------------------------------------------
-
-// Layout 04: sprite grande a esquerda, dados a direita.
-class DetailActivity : public brls::Activity {
- public:
-  LogScreen log_screen_{"DetailActivity"};
-
-  explicit DetailActivity(const g3::BoxPokemon& mon) : mon_(mon) {}
-
-  brls::View* createContentView() override {
-    auto* root = new GradientBackground();
-    root->setHeaderBand(58);
-    root->setAxis(brls::Axis::COLUMN);
-
-    // Barra superior.
-    auto* bar = new brls::Box(brls::Axis::ROW);
-    bar->setHeight(58);
-    bar->setAlignItems(brls::AlignItems::CENTER);
-    bar->setPadding(0, 40, 0, 40);
-    // Sem fundo proprio: a faixa diagonal do GradientBackground e o fundo
-    // desta barra. Um retangulo branco aqui cobriria a diagonal.
-    auto* barTitle = new brls::Label();
-    barTitle->setText("DETALHES");
-    barTitle->setFontSize(30);
-    barTitle->setTextColor(kTextPrimary);
-    bar->addView(barTitle);
-    root->addView(bar);
-
-    auto* body = new brls::Box(brls::Axis::ROW);
-    body->setGrow(1.0f);
-    body->setPadding(24, 40, 24, 40);
-
-    body->addView(MakeSpritePanel());
-    body->addView(MakeDataPanel());
-    root->addView(body);
-
-
-    root->setFocusable(true);
-    root->registerAction(
-        "Voltar", brls::BUTTON_B,
-        [](brls::View*) {
-          brls::Application::popActivity();
-          return true;
-        },
-        false);
-    return root;
-  }
-
- private:
-  brls::Box* MakeSpritePanel() {
-    auto* panel = new brls::Box(brls::Axis::COLUMN);
-    panel->setWidth(420);
-    panel->setCornerRadius(28);
-    panel->setBackgroundColor(nvgRGBA(255, 255, 255, 158));
-    panel->setJustifyContent(brls::JustifyContent::CENTER);
-    panel->setAlignItems(brls::AlignItems::CENTER);
-    panel->setMarginRight(24);
-
-    const std::string path = SpritePath(mon_);
-    if (!path.empty()) {
-      auto* img = new brls::Image();
-      img->setSize(brls::Size(220, 220));
-      img->setScalingType(brls::ImageScalingType::STRETCH);
-      img->setInterpolation(brls::ImageInterpolation::NEAREST);
-      img->setImageFromFile(SpritePathBig(mon_));
-      panel->addView(img);
-    }
-
-    auto* name = new brls::Label();
-    // Estrela marca o shiny, como o jogo faz na tela de status (spec 025).
-    name->setText(g3::SpeciesName(mon_.species) +
-                  (mon_.is_shiny() ? "  ★" : ""));
-    name->setFontSize(38);
-    name->setTextColor(kTextPrimary);
-    name->setMarginTop(16);
-    panel->addView(name);
-
-    if (!mon_.nickname.empty() &&
-        mon_.nickname != g3::SpeciesName(mon_.species)) {
-      auto* nick = new brls::Label();
-      nick->setText(mon_.nickname);
-      nick->setFontSize(20);
-      nick->setTextColor(kTextSecondary);
-      panel->addView(nick);
-    }
-    return panel;
-  }
-
-  // Bloco rotulado, usado para natureza, amizade e experiencia.
-  brls::Box* MakeInfoBox(const std::string& label, const std::string& value) {
-    auto* box = new brls::Box(brls::Axis::COLUMN);
-    box->setGrow(1.0f);
-    box->setCornerRadius(18);
-    box->setBackgroundColor(nvgRGBA(255, 255, 255, 158));
-    box->setPadding(14, 20, 14, 20);
-    box->setMargins(0, 6, 0, 6);
-
-    auto* l = new brls::Label();
-    l->setText(label);
-    l->setFontSize(16);
-    l->setTextColor(kTextTertiary);
-    box->addView(l);
-
-    auto* v = new brls::Label();
-    v->setText(value);
-    v->setFontSize(24);
-    v->setTextColor(kTextPrimary);
-    box->addView(v);
-    return box;
-  }
-
-  // Linha de stat: valor real calculado a esquerda, barra proporcional ao IV,
-  // e IV/EV a direita. O stat de batalha nao existe em Pokemon de caixa — e
-  // calculado a partir de base stats, IVs, EVs, nivel e natureza.
-  brls::Box* MakeStatRow(const char* label, std::uint16_t value, std::uint8_t iv,
-                         std::uint8_t ev) {
-    auto* row = new brls::Box(brls::Axis::ROW);
-    row->setAlignItems(brls::AlignItems::CENTER);
-    row->setMarginBottom(8);
-
-    auto* l = new brls::Label();
-    l->setText(label);
-    l->setFontSize(19);
-    l->setTextColor(kTextSecondary);
-    l->setWidth(52);
-    row->addView(l);
-
-    // Valor real, em destaque: e o numero que o jogador reconhece.
-    auto* real = new brls::Label();
-    real->setText(std::to_string(value));
-    real->setFontSize(24);
-    real->setTextColor(kTextPrimary);
-    real->setWidth(56);
-    real->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
-    row->addView(real);
-
-    // A trilha usa proporcao em vez de largura percentual: setWidthPercentage
-    // num filho de container flexivel transbordava o card. Aqui a barra e
-    // dividida em duas partes com grow proporcional ao IV.
-    auto* track = new brls::Box(brls::Axis::ROW);
-    track->setGrow(1.0f);
-    track->setShrink(1.0f);
-    track->setHeight(10);
-    track->setCornerRadius(5);
-    track->setBackgroundColor(nvgRGB(0xE3, 0xEC, 0xE5));
-    track->setMargins(0, 14, 0, 14);
-
-    const float ratio = static_cast<float>(iv) / 31.0f;
-
-    auto* fill = new brls::Box(brls::Axis::ROW);
-    fill->setGrow(ratio);
-    fill->setShrink(1.0f);
-    fill->setHeight(10);
-    fill->setCornerRadius(5);
-    fill->setBackgroundColor(nvgRGB(0x7F, 0xAE, 0x8E));
-    track->addView(fill);
-
-    auto* rest = new brls::Box(brls::Axis::ROW);
-    rest->setGrow(1.0f - ratio);
-    rest->setShrink(1.0f);
-    track->addView(rest);
-
-    row->addView(track);
-
-    auto* val = new brls::Label();
-    val->setText(std::to_string(iv) + " / " + std::to_string(ev));
-    val->setFontSize(19);
-    val->setTextColor(kTextPrimary);
-    val->setWidth(84);
-    val->setHorizontalAlign(brls::HorizontalAlign::RIGHT);
-    row->addView(val);
-
-    return row;
-  }
-
-  brls::Box* MakeDataPanel() {
-    auto* col = new brls::Box(brls::Axis::COLUMN);
-    col->setGrow(1.0f);
-
-    // Linha de informacoes gerais.
-    auto* info = new brls::Box(brls::Axis::ROW);
-    info->setMarginBottom(12);
-    const g3::BattleStats level_info = g3::ComputeStats(mon_);
-    info->addView(MakeInfoBox("NIVEL", std::to_string(level_info.level)));
-    info->addView(MakeInfoBox("NATUREZA", g3::NatureName(mon_.nature())));
-    info->addView(MakeInfoBox("AMIZADE", std::to_string(mon_.friendship)));
-    col->addView(info);
-
-    // Habilidade e item (spec 023, §6 da pesquisa). Segunda linha para nao
-    // espremer a primeira.
-    auto* info2 = new brls::Box(brls::Axis::ROW);
-    info2->setMarginBottom(12);
-
-    const g3::PersonalInfo personal = g3::Personal(g3::NationalDex(mon_.species));
-    const std::string ability = g3::AbilityName(personal.ability(mon_.ability_bit));
-    info2->addView(MakeInfoBox("HABILIDADE", ability.empty() ? "—" : ability));
-
-    // Sem tabela de nomes de itens ainda (~370 entradas). Mostrar o id cru
-    // comunica que o Pokemon segura algo; esconder o campo daria a impressao
-    // de que nao segura nada. Ver TD-01 da spec 023.
-    info2->addView(MakeInfoBox(
-        "ITEM", mon_.held_item == 0
-                    ? "Nenhum"
-                    : "#" + std::to_string(mon_.held_item)));
-    col->addView(info2);
-
-    // Stats: IV / EV.
-    auto* stats = new brls::Box(brls::Axis::COLUMN);
-    stats->setCornerRadius(22);
-    stats->setBackgroundColor(nvgRGBA(255, 255, 255, 158));
-    stats->setPadding(18, 24, 18, 24);
-    stats->setMarginBottom(12);
-
-    auto* statsLabel = new brls::Label();
-    statsLabel->setText("STATS  ( barra = IV,  direita = IV / EV )");
-    statsLabel->setFontSize(16);
-    statsLabel->setTextColor(kTextTertiary);
-    statsLabel->setMarginBottom(10);
-    stats->addView(statsLabel);
-
-    const g3::BattleStats bs = g3::ComputeStats(mon_);
-
-    // Ordem do save: HP, Atk, Def, Spe, SpA, SpD.
-    static const char* kNames[6] = {"HP", "Atq", "Def", "Vel", "AtqE", "DefE"};
-    for (int i = 0; i < 6; ++i) {
-      stats->addView(
-          MakeStatRow(kNames[i], bs.values[i], mon_.ivs[i], mon_.evs[i]));
-    }
-    col->addView(stats);
-
-    // Golpes.
-    auto* moves = new brls::Box(brls::Axis::COLUMN);
-    moves->setGrow(1.0f);
-    moves->setCornerRadius(22);
-    moves->setBackgroundColor(nvgRGBA(255, 255, 255, 158));
-    moves->setPadding(18, 24, 18, 24);
-
-    auto* movesLabel = new brls::Label();
-    movesLabel->setText("GOLPES");
-    movesLabel->setFontSize(16);
-    movesLabel->setTextColor(kTextTertiary);
-    movesLabel->setMarginBottom(10);
-    moves->addView(movesLabel);
-
-    for (int i = 0; i < 4; ++i) {
-      const std::string name = g3::MoveName(mon_.moves[i]);
-      if (name.empty()) continue;  // slot vazio: omitir, nao mostrar "???"
-
-      auto* row = new brls::Box(brls::Axis::ROW);
-      row->setAlignItems(brls::AlignItems::CENTER);
-      // Raio = metade da altura. 999 numa caixa de 42px vira elipse.
-      row->setCornerRadius(21);
-      row->setHeight(42);
-      row->setBackgroundColor(nvgRGBA(255, 255, 255, 200));
-      row->setPadding(0, 22, 0, 22);
-      row->setMarginBottom(8);
-
-      auto* n = new brls::Label();
-      n->setText(name);
-      n->setFontSize(22);
-      n->setTextColor(kTextPrimary);
-      n->setGrow(1.0f);
-      row->addView(n);
-
-      auto* pp = new brls::Label();
-      pp->setText("PP " + std::to_string(mon_.pp[i]));
-      pp->setFontSize(19);
-      pp->setTextColor(kTextSecondary);
-      row->addView(pp);
-
-      moves->addView(row);
-    }
-    col->addView(moves);
-
-    return col;
-  }
-
-  g3::BoxPokemon mon_;
-};
 
 // --- Atualizacao -----------------------------------------------------------
 
@@ -3736,7 +3865,9 @@ class ListActivity : public brls::Activity {
         [this](brls::View*) {
           const g3::BoxPokemon mon = MonAt(top_ + focused_);
           if (mon.empty()) return true;
-          brls::Application::pushActivity(new DetailActivity(mon));
+          // Check Summary (spec 103). Sem fonte de caixa: a lista atravessa
+          // caixas e o L/R do summary navega dentro de UMA caixa.
+          ShowSummary(mon, nullptr, 0, 0);
           return true;
         },
         false);
@@ -4479,7 +4610,8 @@ class RestoreActivity;
 
 // Barra de legenda do rodape (spec 050). Definida junto do FooterTab, que
 // depende da MessageBox — por isso so a declaracao aqui.
-brls::Box* MakeLegendBar(bool back = true, brls::Label** out_back = nullptr);
+brls::Box* MakeLegendBar(bool back = true, brls::Label** out_back = nullptr,
+                         const std::string& right_hint = "");
 
 // Desenha os Pokemon do bloco que caem FORA da grade (spec 088, rodada 9).
 //
@@ -4575,6 +4707,988 @@ class BlockOverflow : public brls::View {
   Provider provider_;
 };
 
+// Simbolo de sexo desenhado em nanovg (spec 099): a fonte nao tem ♂/♀, e
+// glifo ausente vira invisivel — desenho nao depende de fonte. O formato e o
+// do HOME: circulo cheio azul/rosa com o simbolo branco por cima.
+class GenderIcon : public brls::View {
+ public:
+  // 0=M 1=F; qualquer outro valor nao desenha nada.
+  void Set(int g) { gender_ = g; }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style,
+            brls::FrameContext*) override {
+    if (gender_ != 0 && gender_ != 1) return;
+    const float cx = x + w / 2, cy = y + h / 2, r = h / 2;
+    nvgBeginPath(vg);
+    nvgCircle(vg, cx, cy, r);
+    nvgFillColor(vg, gender_ == 0 ? nvgRGB(0x3C, 0x9E, 0xF0)
+                                  : nvgRGB(0xF0, 0x6E, 0x96));
+    nvgFill(vg);
+
+    nvgStrokeColor(vg, nvgRGB(255, 255, 255));
+    nvgStrokeWidth(vg, 1.8f);
+    if (gender_ == 0) {
+      // ♂: circulo deslocado para baixo-esquerda + seta para nordeste.
+      nvgBeginPath(vg);
+      nvgCircle(vg, cx - r * 0.18f, cy + r * 0.18f, r * 0.34f);
+      nvgStroke(vg);
+      const float bx = cx + r * 0.06f, by = cy - r * 0.06f;
+      const float tx = cx + r * 0.52f, ty = cy - r * 0.52f;
+      nvgBeginPath(vg);
+      nvgMoveTo(vg, bx, by);
+      nvgLineTo(vg, tx, ty);
+      nvgMoveTo(vg, tx - r * 0.36f, ty);
+      nvgLineTo(vg, tx, ty);
+      nvgLineTo(vg, tx, ty + r * 0.36f);
+      nvgStroke(vg);
+    } else {
+      // ♀: circulo em cima + haste com travessao.
+      nvgBeginPath(vg);
+      nvgCircle(vg, cx, cy - r * 0.22f, r * 0.34f);
+      nvgStroke(vg);
+      nvgBeginPath(vg);
+      nvgMoveTo(vg, cx, cy + r * 0.12f);
+      nvgLineTo(vg, cx, cy + r * 0.62f);
+      nvgMoveTo(vg, cx - r * 0.26f, cy + r * 0.38f);
+      nvgLineTo(vg, cx + r * 0.26f, cy + r * 0.38f);
+      nvgStroke(vg);
+    }
+  }
+
+ private:
+  int gender_ = -1;
+};
+
+// Icone de pessoa do treinador original (spec 099): cabeca + ombros brancos,
+// como na captura do HOME. Nanovg — a fonte nao tem o glifo.
+class PersonIcon : public brls::View {
+  void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style,
+            brls::FrameContext*) override {
+    const float cx = x + w / 2;
+    nvgFillColor(vg, nvgRGB(255, 255, 255));
+    nvgBeginPath(vg);
+    nvgCircle(vg, cx, y + h * 0.30f, h * 0.22f);
+    nvgFill(vg);
+    // Ombros: meia-capsula fechada pela base.
+    nvgBeginPath(vg);
+    nvgArc(vg, cx, y + h * 0.98f, h * 0.38f, NVG_PI, 2 * NVG_PI, NVG_CW);
+    nvgClosePath(vg);
+    nvgFill(vg);
+  }
+};
+
+// Os seis marcadores da caixa em contorno esmaecido (spec 099): circulo,
+// triangulo, quadrado, coracao, estrela e losango. Desenhados em nanovg pelo
+// mesmo motivo do GenderIcon. Continuam espaco reservado (spec 098).
+class MarkStrip : public brls::View {
+ public:
+  // Um dos 6 marcadores (circulo, triangulo, quadrado, coracao, estrela,
+  // losango), centrado em (cx, cy) com "raio" s. A cor e a do nvgFillColor
+  // corrente. Compartilhado com a tela de summary (spec 103).
+  static void DrawMark(NVGcontext* vg, int i, float cx, float cy, float s) {
+    nvgBeginPath(vg);
+    switch (i) {
+      case 0:
+        nvgCircle(vg, cx, cy, s);
+        break;
+      case 1:
+        nvgMoveTo(vg, cx, cy - s);
+        nvgLineTo(vg, cx + s, cy + s * 0.85f);
+        nvgLineTo(vg, cx - s, cy + s * 0.85f);
+        nvgClosePath(vg);
+        break;
+      case 2:
+        nvgRect(vg, cx - s * 0.9f, cy - s * 0.9f, s * 1.8f, s * 1.8f);
+        break;
+      case 3:
+        nvgMoveTo(vg, cx, cy + s * 0.9f);
+        nvgBezierTo(vg, cx - s * 1.5f, cy - s * 0.15f, cx - s * 0.6f,
+                    cy - s * 1.1f, cx, cy - s * 0.3f);
+        nvgBezierTo(vg, cx + s * 0.6f, cy - s * 1.1f, cx + s * 1.5f,
+                    cy - s * 0.15f, cx, cy + s * 0.9f);
+        break;
+      case 4:
+        for (int p = 0; p < 10; ++p) {
+          const float rr = (p % 2 == 0) ? s * 1.1f : s * 0.45f;
+          const float a = -NVG_PI / 2 + p * NVG_PI / 5;
+          const float px = cx + rr * std::cos(a), py = cy + rr * std::sin(a);
+          if (p == 0) nvgMoveTo(vg, px, py);
+          else nvgLineTo(vg, px, py);
+        }
+        nvgClosePath(vg);
+        break;
+      case 5:
+        nvgMoveTo(vg, cx, cy - s);
+        nvgLineTo(vg, cx + s * 0.8f, cy);
+        nvgLineTo(vg, cx, cy + s);
+        nvgLineTo(vg, cx - s * 0.8f, cy);
+        nvgClosePath(vg);
+        break;
+    }
+    nvgFill(vg);
+  }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h, brls::Style,
+            brls::FrameContext*) override {
+    // Cheios e esmaecidos, como na captura do HOME (passo ~42px).
+    const float step = w / 6.0f, cy = y + h / 2, s = 8.0f;
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, 210));
+    for (int i = 0; i < 6; ++i) DrawMark(vg, i, x + step * i + step / 2, cy, s);
+  }
+};
+
+// --- Identidade compartilhada (specs 098/103) ------------------------------
+//
+// Viviam como estaticos da BoxActivity; subiram para escopo de namespace na
+// spec 103 porque a tela de summary mostra os mesmos dados.
+
+// Tag de idioma como o HOME exibe (spec 098). A numeracao e a mesma do
+// gen3 ao gen9: 1=JPN 2=ENG 3=FRE 4=ITA 5=GER 7=SPA 8=KOR 9=CHS 10=CHT.
+const char* LanguageTag(std::uint8_t lang) {
+  switch (lang) {
+    case 1: return "JPN";
+    case 2: return "ENG";
+    case 3: return "FRE";
+    case 4: return "ITA";
+    case 5: return "GER";
+    case 7: return "SPA";
+    case 8: return "KOR";
+    case 9: return "CHS";
+    case 10: return "CHT";
+    default: return "";
+  }
+}
+
+// Sigla do jogo de origem, no lugar da insignia grafica (spec 098). Os
+// codigos sao o GameVersion unificado que todos os formatos usam — o gen3
+// grava 1-5/15 na word de origins, os modernos gravam o byte direto.
+const char* GameSigla(std::uint8_t game) {
+  switch (game) {
+    case 1: return "S";    case 2: return "R";    case 3: return "E";
+    case 4: return "FR";   case 5: return "LG";   case 7: return "HG";
+    case 8: return "SS";   case 10: return "D";   case 11: return "P";
+    case 12: return "PT";  case 15: return "CXD"; case 20: return "W";
+    case 21: return "B";   case 22: return "W2";  case 23: return "B2";
+    case 24: return "X";   case 25: return "Y";   case 26: return "AS";
+    case 27: return "OR";  case 30: return "SN";  case 31: return "MN";
+    case 32: return "US";  case 33: return "UM";  case 42: return "GP";
+    case 43: return "GE";  case 44: return "SW";  case 45: return "SH";
+    case 47: return "LA";  case 48: return "BD";  case 49: return "SP";
+    case 50: return "SL";  case 51: return "VL";
+    // 52 conferido no save real do Z-A do dono (sonda da spec 099).
+    case 52: return "ZA";
+    default: return "—";
+  }
+}
+
+// Sprite da pokebola por id (numeracao gen3/moderna compartilhada).
+// Fora da faixa = nullptr e a vetorial continua.
+const char* BallSprite(std::uint8_t ball) {
+  static const char* kBalls[] = {
+      nullptr,        "master-ball",  "ultra-ball",  "great-ball",
+      "poke-ball",    "safari-ball",  "net-ball",    "dive-ball",
+      "nest-ball",    "repeat-ball",  "timer-ball",  "luxury-ball",
+      "premier-ball", "dusk-ball",    "heal-ball",   "quick-ball",
+      "cherish-ball", "fast-ball",    "level-ball",  "lure-ball",
+      "heavy-ball",   "love-ball",    "friend-ball", "moon-ball",
+      "sport-ball",   "dream-ball",   "beast-ball"};
+  return ball < sizeof(kBalls) / sizeof(kBalls[0]) ? kBalls[ball] : nullptr;
+}
+
+// Nome do arquivo de icone de tipo (romfs/ui/types), numeracao do PokeAPI
+// (1=normal ... 18=fairy). nullptr fora da faixa.
+const char* TypeSpriteName(int t) {
+  static const char* kNames[] = {
+      "",       "normal",  "fighting", "flying", "poison",  "ground",
+      "rock",   "bug",     "ghost",    "steel",  "fire",    "water",
+      "grass",  "electric","psychic",  "ice",    "dragon",  "dark",
+      "fairy"};
+  return (t >= 1 && t <= 18) ? kNames[t] : nullptr;
+}
+
+// --- Check Summary 1:1 com o Pokemon HOME (spec 103) -----------------------
+//
+// A referencia e docs/referencia-summary-home.jpg, captura NATIVA 1280x720 do
+// console — toda coordenada e cor abaixo foi medida nela, entao os numeros
+// sao absolutos de proposito: a tela nao reflui. Texto usa a fonte do app (a
+// do HOME e proprietaria da Nintendo), entao posicao e alinhamento batem; a
+// metrica dos glifos nao — criterio registrado na spec.
+
+// Cores medidas na captura (conta-gotas).
+const NVGcolor kSumOrange = nvgRGB(0xF0, 0x82, 0x1E);    // titulo e cubo
+const NVGcolor kSumText = nvgRGB(0x4E, 0x5A, 0x54);      // texto escuro geral
+const NVGcolor kSumTeal = nvgRGB(0x35, 0xB3, 0xA8);      // header do cartao
+const NVGcolor kSumTealBar = nvgRGB(0x2F, 0xA8, 0x9E);   // barras OT/ID
+const NVGcolor kSumBand = nvgRGB(0xDE, 0xF3, 0xE8);      // faixa de navegacao
+const NVGcolor kSumUnderOn = nvgRGB(0x2F, 0xB0, 0xA6);   // barra de posicao
+const NVGcolor kSumUnderOff = nvgRGB(0xBF, 0xE3, 0xDE);
+const NVGcolor kSumTag = nvgRGB(0x8F, 0xA2, 0x9A);       // ENG e chevrons
+const NVGcolor kSumRadarBg = nvgRGBA(0xB0, 0xB0, 0xB0, 235);
+const NVGcolor kSumRadarFill = nvgRGB(0x3D, 0x87, 0xE8);
+const NVGcolor kSumDivider = nvgRGB(0xCB, 0xE9, 0xDA);
+const NVGcolor kSumLink = nvgRGB(0x2E, 0x7F, 0xE0);      // "Pokemon HOME" azul
+const NVGcolor kSumMarkOff = nvgRGB(0xB9, 0xC4, 0xBE);
+const NVGcolor kSumMarkBlue = nvgRGB(0x57, 0xA8, 0xE8);
+const NVGcolor kSumMarkPink = nvgRGB(0xF0, 0x8C, 0xA8);
+const NVGcolor kSumFooterText = nvgRGB(0x3B, 0x4A, 0x43);
+
+class SummaryContent : public brls::Box {
+ public:
+  SummaryContent(g3::BoxPokemon mon, BoxSource* source, std::size_t box,
+                 std::size_t slot)
+      : mon_(std::move(mon)), source_(source), box_(box), slot_(slot) {
+    // Imagens sao filhos ABSOLUTE; todo o resto e desenhado no draw().
+    auto make_img = [this](float left, float top, float size) {
+      auto* img = new brls::Image();
+      img->setPositionType(brls::PositionType::ABSOLUTE);
+      img->setPositionLeft(left);
+      img->setPositionTop(top);
+      img->setSize(brls::Size(size, size));
+      img->setScalingType(brls::ImageScalingType::FIT);
+      addView(img);
+      return img;
+    };
+    sprite_ = make_img(880.0f, 150.0f, 300.0f);
+    prev_ = make_img(60.0f, 62.0f, 56.0f);
+    next_ = make_img(1172.0f, 62.0f, 56.0f);
+    ball_ = make_img(281.0f, 75.0f, 30.0f);
+    head_type_ = make_img(796.0f, 178.0f, 32.0f);
+    for (int i = 0; i < 4; ++i)
+      move_type_[i] = make_img(560.0f, 242.0f + kMoveStep * i, 34.0f);
+
+    gender_ = new GenderIcon();
+    gender_->setPositionType(brls::PositionType::ABSOLUTE);
+    gender_->setPositionLeft(541.0f);
+    gender_->setPositionTop(75.0f);
+    gender_->setSize(brls::Size(30.0f, 30.0f));
+    addView(gender_);
+
+    Load(slot_);
+  }
+
+  // L/R: Pokemon anterior/seguinte da caixa, pulando vazios (spec 103).
+  bool Nav(int dir) {
+    if (!source_) return true;  // aberta da lista: sem caixa em volta
+    const std::size_t n = kSlotsPerBox;
+    std::size_t s = slot_;
+    for (std::size_t i = 1; i < n; ++i) {
+      s = (s + n + static_cast<std::size_t>(dir)) % n;
+      if (!source_->At(box_, s).empty()) {
+        NLOG_NAV("summary: %s -> slot %zu", dir < 0 ? "L" : "R", s);
+        Load(s);
+        return true;
+      }
+    }
+    return true;  // sozinho na caixa
+  }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h,
+            brls::Style style, brls::FrameContext* ctx) override {
+    nvgFontFaceId(vg, brls::Application::getDefaultFont());
+
+    // --- Fundo: gradiente vertical verde-menta + faixa diagonal clara ------
+    NVGpaint bg = nvgLinearGradient(vg, x, y + 122.0f, x, y + h,
+                                    nvgRGB(0xEA, 0xF7, 0xEE),
+                                    nvgRGB(0xA5, 0xE3, 0xC2));
+    nvgBeginPath(vg);
+    nvgRect(vg, x, y, w, h);
+    nvgFillPaint(vg, bg);
+    nvgFill(vg);
+    // Faixa diagonal translucida no topo direito, como na captura.
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, x + w * 0.42f, y);
+    nvgLineTo(vg, x + w, y);
+    nvgLineTo(vg, x + w, y + 300.0f);
+    nvgClosePath(vg);
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, 46));
+    nvgFill(vg);
+
+    // --- Header branco (0-58) ----------------------------------------------
+    nvgBeginPath(vg);
+    nvgRect(vg, x, y, w, 58.0f);
+    nvgFillColor(vg, kWhite);
+    nvgFill(vg);
+    DrawHomeCube(vg, x + 41.0f, y + 29.0f, 16.0f);
+    Text(vg, x + 74.0f, y + 30.0f, 27.0f, kSumOrange,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, "CHECK SUMMARY");
+    // Relogio real, como o console mostra.
+    char clock[8] = "";
+    const std::time_t now = std::time(nullptr);
+    std::strftime(clock, sizeof(clock), "%H:%M", std::localtime(&now));
+    Text(vg, x + 1204.0f, y + 30.0f, 25.0f, kSumText,
+         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, clock);
+    // Avatar do treinador: nao temos esse dado — placeholder neutro
+    // (decisao em aberto na spec 103).
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x + 1222.0f, y + 7.0f, 44.0f, 44.0f, 6.0f);
+    nvgFillColor(vg, nvgRGB(0xCF, 0xE3, 0xDA));
+    nvgFill(vg);
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, 220));
+    nvgBeginPath(vg);
+    nvgCircle(vg, x + 1244.0f, y + 24.0f, 8.0f);
+    nvgFill(vg);
+    nvgBeginPath(vg);
+    nvgCircle(vg, x + 1244.0f, y + 46.0f, 13.0f);
+    nvgFill(vg);
+
+    // --- Faixa de navegacao (58-122) ---------------------------------------
+    nvgBeginPath(vg);
+    nvgRect(vg, x, y + 58.0f, w, 64.0f);
+    nvgFillColor(vg, kSumBand);
+    nvgFill(vg);
+    Text(vg, x + 124.0f, y + 90.0f, 30.0f, kSumTag,
+         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, kGlyphChevronLeft);
+    Text(vg, x + 152.0f, y + 90.0f, 34.0f, kSumText,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, kGlyphL);
+    Text(vg, x + 1156.0f, y + 90.0f, 30.0f, kSumTag,
+         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, kGlyphChevronRight);
+    Text(vg, x + 1126.0f, y + 90.0f, 34.0f, kSumText,
+         NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE, kGlyphR);
+
+    // Nome, nivel e marca de origem no grupo central.
+    Text(vg, x + 330.0f, y + 90.0f, 30.0f, kSumText,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE,
+         name_ + (mon_.is_shiny() ? "  ★" : ""));
+    Text(vg, x + 676.0f, y + 90.0f, 28.0f, kSumText,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, "Lv. " + std::to_string(level_));
+    DrawOriginMark(vg, x + 820.0f, y + 90.0f, 14.0f);
+
+    // Barra de posicao na caixa, sob o grupo central.
+    const float bar_x = x + 220.0f, bar_w = 838.0f, bar_y = y + 114.0f;
+    nvgBeginPath(vg);
+    nvgRect(vg, bar_x, bar_y, bar_w, 6.0f);
+    nvgFillColor(vg, kSumUnderOff);
+    nvgFill(vg);
+    const float frac =
+        source_ ? static_cast<float>(slot_ + 1) / kSlotsPerBox : 1.0f;
+    nvgBeginPath(vg);
+    nvgRect(vg, bar_x, bar_y, bar_w * frac, 6.0f);
+    nvgFillColor(vg, kSumUnderOn);
+    nvgFill(vg);
+
+    // --- Tag de idioma ------------------------------------------------------
+    if (!lang_.empty()) {
+      nvgBeginPath(vg);
+      nvgRoundedRect(vg, x + 30.0f, y + 124.0f, 84.0f, 34.0f, 6.0f);
+      nvgFillColor(vg, nvgRGBA(255, 255, 255, 160));
+      nvgFill(vg);
+      nvgStrokeColor(vg, kSumTag);
+      nvgStrokeWidth(vg, 3.0f);
+      nvgStroke(vg);
+      Text(vg, x + 72.0f, y + 141.0f, 23.0f, kSumTag,
+           NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, lang_);
+    }
+
+    DrawRadar(vg, x + 258.0f, y + 341.0f, 118.0f);
+
+    // --- Tabela Nature/Ability/Held Item ------------------------------------
+    {
+      const float tx = x + 48.0f, ty = y + 565.0f, tw = 418.0f, th = 111.0f;
+      nvgBeginPath(vg);
+      nvgRoundedRect(vg, tx, ty, tw, th, 10.0f);
+      nvgFillColor(vg, nvgRGBA(255, 255, 255, 225));
+      nvgFill(vg);
+      nvgStrokeColor(vg, kSumDivider);
+      nvgStrokeWidth(vg, 1.5f);
+      for (int r = 1; r < 3; ++r) {
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, tx + 12.0f, ty + th / 3 * r);
+        nvgLineTo(vg, tx + tw - 12.0f, ty + th / 3 * r);
+        nvgStroke(vg);
+      }
+      nvgBeginPath(vg);
+      nvgMoveTo(vg, tx + 148.0f, ty + 8.0f);
+      nvgLineTo(vg, tx + 148.0f, ty + th - 8.0f);
+      nvgStroke(vg);
+      const char* labels[3] = {"Nature", "Ability", "Held Item"};
+      const std::string* values[3] = {&nature_, &ability_, &item_};
+      for (int r = 0; r < 3; ++r) {
+        const float cy = ty + th / 6 + th / 3 * r;
+        Text(vg, tx + 74.0f, cy, 23.0f, kSumText,
+             NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, labels[r]);
+        Text(vg, tx + 167.0f, cy, 23.0f, kSumText,
+             NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, *values[r]);
+      }
+    }
+
+    // --- Cartao de golpes ---------------------------------------------------
+    {
+      const float cx0 = x + 508.0f, cy0 = y + 175.0f, cw = 372.0f;
+      DrawSoftShadow(vg, cx0, cy0, cw, 295.0f, 10.0f);
+      nvgBeginPath(vg);
+      nvgRoundedRectVarying(vg, cx0, cy0, cw, 38.0f, 10.0f, 10.0f, 0.0f, 0.0f);
+      nvgFillColor(vg, kSumTeal);
+      nvgFill(vg);
+      nvgBeginPath(vg);
+      nvgRoundedRectVarying(vg, cx0, cy0 + 38.0f, cw, 257.0f, 0.0f, 0.0f,
+                            10.0f, 10.0f);
+      nvgFillColor(vg, nvgRGBA(255, 255, 255, 240));
+      nvgFill(vg);
+      char dex_no[16];
+      std::snprintf(dex_no, sizeof(dex_no), "No. %04d", dex_);
+      Text(vg, cx0 + 34.0f, cy0 + 19.0f, 24.0f, kWhite,
+           NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, dex_no);
+      Text(vg, cx0 + 217.0f, cy0 + 19.0f, 24.0f, kWhite,
+           NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, species_);
+      // Linhas de golpe: nome; o icone de tipo e um filho Image.
+      int drawn = 0;
+      for (int i = 0; i < 4; ++i) {
+        if (mon_.moves[i] == 0) continue;
+        const float cy = cy0 + 84.0f + kMoveStep * i;
+        Text(vg, cx0 + 107.0f, cy, 24.0f, kSumText,
+             NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, move_names_[i]);
+        if (drawn > 0) {
+          nvgBeginPath(vg);
+          nvgMoveTo(vg, cx0 + 22.0f, cy - kMoveStep / 2 + 0.5f);
+          nvgLineTo(vg, cx0 + cw - 22.0f, cy - kMoveStep / 2 + 0.5f);
+          nvgStrokeColor(vg, kSumDivider);
+          nvgStrokeWidth(vg, 1.5f);
+          nvgStroke(vg);
+        }
+        ++drawn;
+      }
+    }
+
+    // Brilho suave atras do sprite grande.
+    NVGpaint glow = nvgRadialGradient(vg, x + 1030.0f, y + 300.0f, 40.0f,
+                                      170.0f, nvgRGBA(255, 255, 230, 90),
+                                      nvgRGBA(255, 255, 230, 0));
+    nvgBeginPath(vg);
+    nvgRect(vg, x + 850.0f, y + 120.0f, 380.0f, 370.0f);
+    nvgFillPaint(vg, glow);
+    nvgFill(vg);
+
+    // --- Marcacoes ----------------------------------------------------------
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x + 952.0f, y + 463.0f, 316.0f, 42.0f, 8.0f);
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, 140));
+    nvgFill(vg);
+    for (int i = 0; i < 6; ++i) {
+      // 2 bits por marca nos formatos modernos: 0=apagada 1=azul 2=rosa.
+      const unsigned v = (markings_ >> (2 * i)) & 3u;
+      nvgFillColor(vg, v == 1 ? kSumMarkBlue
+                              : v == 2 ? kSumMarkPink : kSumMarkOff);
+      MarkStrip::DrawMark(vg, i, x + 985.0f + 52.0f * i, y + 484.0f, 11.0f);
+    }
+
+    // --- Barras OT / ID No. -------------------------------------------------
+    DrawIdBar(vg, x + 508.0f, y + 516.0f, 339.0f, 112.0f, "OT", ot_);
+    DrawIdBar(vg, x + 855.0f, y + 516.0f, 400.0f, 133.0f, "ID No.", id_);
+
+    // --- Memo ---------------------------------------------------------------
+    {
+      const float mx = x + 508.0f, my = y + 565.0f;
+      nvgBeginPath(vg);
+      nvgRoundedRect(vg, mx, my, 747.0f, 120.0f, 8.0f);
+      nvgFillColor(vg, nvgRGBA(255, 255, 255, 200));
+      nvgFill(vg);
+      // Linha 1: prefixo escuro + lugar em azul de link, como na captura.
+      nvgFontSize(vg, 22.5f);
+      nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+      nvgFillColor(vg, kSumText);
+      const float adv = nvgText(vg, mx + 16.0f, my + 27.0f,
+                                memo_prefix_.c_str(), nullptr);
+      nvgFillColor(vg, kSumLink);
+      nvgText(vg, adv, my + 27.0f, memo_place_.c_str(), nullptr);
+      if (!memo_tail_.empty()) {
+        Text(vg, mx + 16.0f, my + 57.0f, 22.5f, kSumText,
+             NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, memo_tail_);
+      }
+      Text(vg, mx + 16.0f, my + 95.0f, 22.5f, kSumText,
+           NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, characteristic_);
+    }
+
+    // --- Rodape -------------------------------------------------------------
+    // Sem a barra branca de largura inteira: no app, o branco e SO a pilula
+    // do Ajuda, como nas outras telas (dono, 2026-08-17). A legenda desenha
+    // direto sobre o fundo.
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, x - 24.0f, y + 686.0f, 168.0f, 60.0f, 20.0f);
+    nvgFillColor(vg, kWhite);
+    nvgFill(vg);
+    // Legenda em portugues, como o resto do app (dono, 2026-08-17); so o
+    // conteudo do Pokemon (golpes etc.) fica em ingles. So B/L/R funcionam
+    // nesta spec; o resto e legenda visual (spec 103).
+    const float fy = y + 704.0f;
+    Text(vg, x + 28.0f, fy, 26.0f, kSumFooterText,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, kGlyphMinus);
+    Text(vg, x + 60.0f, fy, 24.0f, kSumFooterText,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, "Ajuda");
+    Text(vg, x + 186.0f, fy, 26.0f, kSumFooterText,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, kGlyphB);
+    Text(vg, x + 218.0f, fy, 24.0f, kSumFooterText,
+         NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, "Voltar");
+    // Lado direito ancorado na BORDA, de tras para a frente, com a largura
+    // medida em runtime: a fonte do app e mais larga que a do HOME e as
+    // ancoras fixas da captura estouravam a tela.
+    struct { const char* glyph; const char* label; } right[3] = {
+        {kGlyphPlus, "Jogos conectados"},
+        {kGlyphY, "Pontos de base"},
+        {kGlyphX, "Mudar marcacoes"}};
+    float rx = x + 1256.0f;
+    for (int i = 2; i >= 0; --i) {
+      nvgFontSize(vg, 24.0f);
+      float bounds[4];
+      const float tw =
+          nvgTextBounds(vg, 0, 0, right[i].label, nullptr, bounds);
+      rx -= tw;
+      Text(vg, rx, fy, 24.0f, kSumFooterText,
+           NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, right[i].label);
+      rx -= 34.0f;
+      Text(vg, rx, fy, 26.0f, kSumFooterText,
+           NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, right[i].glyph);
+      rx -= 36.0f;
+    }
+
+    // Filhos (sprites e icones) por cima das formas.
+    brls::Box::draw(vg, x, y, w, h, style, ctx);
+  }
+
+ private:
+  // Passo vertical das linhas de golpe, medido na captura.
+  static constexpr float kMoveStep = 57.6f;
+
+  static void Text(NVGcontext* vg, float x, float y, float size,
+                   NVGcolor color, int align, const std::string& s) {
+    nvgFontSize(vg, size);
+    nvgFillColor(vg, color);
+    nvgTextAlign(vg, align);
+    nvgText(vg, x, y, s.c_str(), nullptr);
+  }
+
+  // Rotulo do radar: branco com contorno escuro (a captura usa outline; o
+  // nanovg nao tem stroke de texto — quatro copias deslocadas aproximam).
+  static void OutlinedText(NVGcontext* vg, float x, float y, float size,
+                           const std::string& s) {
+    nvgFontSize(vg, size);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    nvgFillColor(vg, nvgRGB(0x5A, 0x6E, 0x62));
+    for (int dx = -1; dx <= 1; ++dx)
+      for (int dy = -1; dy <= 1; ++dy)
+        if (dx || dy) nvgText(vg, x + dx * 1.6f, y + dy * 1.6f, s.c_str(),
+                              nullptr);
+    nvgFillColor(vg, kWhite);
+    nvgText(vg, x, y, s.c_str(), nullptr);
+  }
+
+  // Cubo do logo do HOME: hexagono com o "Y" interno, so contorno laranja.
+  static void DrawHomeCube(NVGcontext* vg, float cx, float cy, float r) {
+    nvgStrokeColor(vg, kSumOrange);
+    nvgStrokeWidth(vg, 3.4f);
+    nvgLineJoin(vg, NVG_ROUND);
+    nvgBeginPath(vg);
+    float px[6], py[6];
+    for (int i = 0; i < 6; ++i) {
+      const float a = -NVG_PI / 2 + i * NVG_PI / 3;
+      px[i] = cx + r * std::cos(a);
+      py[i] = cy + r * std::sin(a);
+      if (i == 0) nvgMoveTo(vg, px[i], py[i]);
+      else nvgLineTo(vg, px[i], py[i]);
+    }
+    nvgClosePath(vg);
+    nvgStroke(vg);
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, cx, cy);
+    nvgLineTo(vg, px[0], py[0]);
+    nvgMoveTo(vg, cx, cy);
+    nvgLineTo(vg, px[2], py[2]);
+    nvgMoveTo(vg, cx, cy);
+    nvgLineTo(vg, px[4], py[4]);
+    nvgStroke(vg);
+  }
+
+  // Marca de origem (o "piao" do HOME na captura): espiral aproximada em dois
+  // arcos. Vetor proprio — a arte da Nintendo nao entra no repo (spec 097).
+  static void DrawOriginMark(NVGcontext* vg, float cx, float cy, float r) {
+    nvgStrokeColor(vg, nvgRGB(0x9F, 0xB9, 0xB2));
+    nvgStrokeWidth(vg, 3.4f);
+    nvgLineCap(vg, NVG_ROUND);
+    nvgBeginPath(vg);
+    nvgArc(vg, cx, cy, r, -NVG_PI * 0.35f, NVG_PI * 1.15f, NVG_CW);
+    nvgStroke(vg);
+    nvgBeginPath(vg);
+    nvgArc(vg, cx, cy, r * 0.45f, NVG_PI * 0.65f, NVG_PI * 1.9f, NVG_CW);
+    nvgStroke(vg);
+  }
+
+  void DrawRadar(NVGcontext* vg, float cx, float cy, float r) const {
+    // Hexagono cinza com raios brancos.
+    auto vertex = [&](int i, float rr, float* vx, float* vy) {
+      const float a = -NVG_PI / 2 + i * NVG_PI / 3;
+      *vx = cx + rr * std::cos(a);
+      *vy = cy + rr * std::sin(a);
+    };
+    nvgBeginPath(vg);
+    for (int i = 0; i < 6; ++i) {
+      float vx, vy;
+      vertex(i, r, &vx, &vy);
+      if (i == 0) nvgMoveTo(vg, vx, vy);
+      else nvgLineTo(vg, vx, vy);
+    }
+    nvgClosePath(vg);
+    nvgFillColor(vg, kSumRadarBg);
+    nvgFill(vg);
+    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 230));
+    nvgStrokeWidth(vg, 2.5f);
+    for (int i = 0; i < 6; ++i) {
+      float vx, vy;
+      vertex(i, r, &vx, &vy);
+      nvgBeginPath(vg);
+      nvgMoveTo(vg, cx, cy);
+      nvgLineTo(vg, vx, vy);
+      nvgStroke(vg);
+    }
+
+    // Poligono azul dos stats. Eixos em sentido horario a partir do topo:
+    // HP, Atk, Def, Spe, SpD, SpA (indices do save 0,1,2,3,5,4).
+    //
+    // ponytail: a escala do HOME nao e publica; stat/(2*maximo teorico no
+    // nivel) reproduz a captura do Pikachu lv5 — knob para a conferencia.
+    const float denom =
+        2.0f * ((604.0f * level_) / 100.0f + level_ + 10.0f);
+    static constexpr int kAxis[6] = {0, 1, 2, 3, 5, 4};
+    nvgBeginPath(vg);
+    for (int i = 0; i < 6; ++i) {
+      const float v = stats_.values[kAxis[i]] / denom;
+      const float rr = r * std::min(1.0f, std::max(v, 0.045f));
+      float vx, vy;
+      vertex(i, rr, &vx, &vy);
+      if (i == 0) nvgMoveTo(vg, vx, vy);
+      else nvgLineTo(vg, vx, vy);
+    }
+    nvgClosePath(vg);
+    nvgFillColor(vg, kSumRadarFill);
+    nvgFill(vg);
+
+    // Rotulos e valores, nas ancoras medidas na captura.
+    struct { const char* label; float lx, ly, vx, vy; int axis; }
+    kLabels[6] = {
+        {"HP", 0.0f, -165.0f, 0.0f, -133.0f, 0},
+        {"Attack", 161.0f, -84.0f, 161.0f, -51.0f, 1},
+        {"Defense", 163.0f, 84.0f, 163.0f, 117.0f, 2},
+        {"Speed", 0.0f, 167.0f, 0.0f, 132.0f, 3},
+        {"Sp. Def", -163.0f, 84.0f, -163.0f, 117.0f, 5},
+        {"Sp. Atk", -164.0f, -84.0f, -164.0f, -51.0f, 4},
+    };
+    for (const auto& l : kLabels) {
+      OutlinedText(vg, cx + l.lx, cy + l.ly, 24.0f, l.label);
+      Text(vg, cx + l.vx, cy + l.vy, 26.0f, kSumText,
+           NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE,
+           std::to_string(stats_.values[l.axis]));
+    }
+  }
+
+  static void DrawIdBar(NVGcontext* vg, float bx, float by, float bw,
+                        float split, const char* label,
+                        const std::string& value) {
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, bx, by, bw, 40.0f, 8.0f);
+    nvgFillColor(vg, kSumTealBar);
+    nvgFill(vg);
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, bx + split, by + 7.0f);
+    nvgLineTo(vg, bx + split, by + 33.0f);
+    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 120));
+    nvgStrokeWidth(vg, 1.5f);
+    nvgStroke(vg);
+    Text(vg, bx + split / 2, by + 20.0f, 23.0f, kWhite,
+         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, label);
+    Text(vg, bx + split + (bw - split) / 2, by + 20.0f, 23.0f, kWhite,
+         NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE, value);
+  }
+
+  // Recarrega todos os dados exibidos a partir do slot dado.
+  void Load(std::size_t slot) {
+    slot_ = slot;
+    if (source_) mon_ = source_->At(box_, slot_);
+    stats_ = g3::ComputeStats(mon_);
+    level_ = mon_.display_level ? mon_.display_level : stats_.level;
+    dex_ = mon_.national_dex ? mon_.national_dex
+                             : g3::NationalDex(mon_.species);
+    species_ = DisplaySpecies(mon_);
+    name_ = mon_.nickname.empty() ? species_ : mon_.nickname;
+    lang_ = LanguageTag(mon_.language);
+    nature_ = g3::NatureName(mon_.nature());
+
+    if (mon_.modern) {
+      const std::uint16_t id = mon_.modern->ability;
+      ability_ = id < pokehome::modern::kAbilityCount
+                     ? pokehome::modern::kAbilityNames[id] : "";
+    } else {
+      const g3::PersonalInfo personal = g3::Personal(dex_);
+      ability_ = g3::AbilityName(personal.ability(mon_.ability_bit));
+    }
+    if (ability_.empty()) ability_ = "—";
+
+    if (mon_.held_item == 0) {
+      item_ = "None";
+    } else if (mon_.modern) {
+      item_ = mon_.held_item < pokehome::modern::kItemCount
+                  ? pokehome::modern::kItemNames[mon_.held_item] : "";
+      if (item_.empty()) item_ = "???";
+    } else {
+      // ponytail: numeracao de item do gen3 difere da moderna e nao ha
+      // tabela propria; gerar uma quando algum save real mostrar item.
+      item_ = "Item #" + std::to_string(mon_.held_item);
+    }
+
+    gender_->Set(g3::Gender(mon_));
+    ot_ = mon_.ot_name;
+    char idbuf[16];
+    if (mon_.modern) {
+      // ID de 6 digitos dos jogos modernos (G7TID).
+      const std::uint32_t full =
+          (static_cast<std::uint32_t>(mon_.modern->sid) << 16) |
+          mon_.modern->tid;
+      std::snprintf(idbuf, sizeof(idbuf), "%06u", full % 1000000u);
+    } else {
+      std::snprintf(idbuf, sizeof(idbuf), "%05u",
+                    static_cast<unsigned>(mon_.ot_id & 0xFFFF));
+    }
+    id_ = idbuf;
+
+    markings_ = mon_.modern ? mon_.modern->markings : 0;
+
+    // Memo (nucleo testado em summary_facts.h; aqui so a quebra de linha e o
+    // acento de exibicao).
+    const bool fateful = mon_.modern && mon_.modern->fateful_encounter;
+    const char* place = pokehome::summary::OriginGameName(mon_.origin_game);
+    memo_place_ = *place ? place : "Pokemon HOME";
+    const std::size_t at = memo_place_.find("Pokemon");
+    if (at != std::string::npos) memo_place_.replace(at, 7, "Pokémon");
+    memo_prefix_ = fateful ? "Seems to have had a fateful encounter in "
+                           : "Seems to have met in ";
+    memo_tail_.clear();
+    if (mon_.modern) {
+      const auto& d = mon_.modern->met_date;
+      if (d[0] || d[1] || d[2]) {
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "on %d/%d/%d.", d[1], d[2],
+                      2000 + d[0]);
+        memo_tail_ = buf;
+      }
+    }
+    if (memo_tail_.empty()) memo_place_ += ".";
+
+    const std::uint8_t* ivs =
+        mon_.modern ? mon_.modern->ivs.data() : mon_.ivs;
+    const std::uint32_t ec =
+        mon_.modern ? mon_.modern->encryption_constant : mon_.personality;
+    characteristic_ =
+        std::string("Characteristic: ") +
+        pokehome::summary::CharacteristicText(
+            pokehome::summary::CharacteristicIndex(ivs, ec));
+
+    // Imagens.
+    sprite_->setImageFromFile(SpritePathBig(mon_));
+    const char* ball = BallSprite(mon_.display_ball);
+    if (!ball && !mon_.modern) ball = "poke-ball";  // gen3 sem bola parseada
+    if (ball) {
+      ball_->setImageFromFile(std::string(POKEHOME_UI_ASSETS) + "balls/" +
+                              ball + ".png");
+      ball_->setVisibility(brls::Visibility::VISIBLE);
+    } else {
+      ball_->setVisibility(brls::Visibility::INVISIBLE);
+    }
+    const std::uint8_t head_t =
+        (dex_ >= 1 && dex_ <= 1025) ? pokehome::modern::kTypeIds[dex_][0] : 0;
+    SetTypeIcon(head_type_, head_t);
+    for (int i = 0; i < 4; ++i) {
+      const std::uint16_t mv = mon_.moves[i];
+      const std::uint8_t t =
+          (mv > 0 && mv < pokehome::modern::kMoveTypeCount)
+              ? pokehome::modern::kMoveTypeIds[mv] : 0;
+      SetTypeIcon(move_type_[i], t);
+      move_names_[i] = DisplayMove(mv);  // spec 106: alcanca a gen9
+    }
+
+    // Vizinhos da caixa para as pontas L/R.
+    SetNeighbor(prev_, -1);
+    SetNeighbor(next_, +1);
+  }
+
+  void SetTypeIcon(brls::Image* img, int type) {
+    const char* name = TypeSpriteName(type);
+    if (name) {
+      img->setImageFromFile(std::string(POKEHOME_UI_ASSETS) + "types/" +
+                            name + ".png");
+      img->setVisibility(brls::Visibility::VISIBLE);
+    } else {
+      img->setVisibility(brls::Visibility::INVISIBLE);
+    }
+  }
+
+  void SetNeighbor(brls::Image* img, int dir) {
+    if (source_) {
+      const std::size_t n = kSlotsPerBox;
+      std::size_t s = slot_;
+      for (std::size_t i = 1; i < n; ++i) {
+        s = (s + n + static_cast<std::size_t>(dir)) % n;
+        const g3::BoxPokemon m = source_->At(box_, s);
+        if (!m.empty()) {
+          img->setImageFromFile(SpritePath(m));
+          img->setVisibility(brls::Visibility::VISIBLE);
+          return;
+        }
+      }
+    }
+    img->setVisibility(brls::Visibility::INVISIBLE);
+  }
+
+  g3::BoxPokemon mon_;
+  BoxSource* source_;
+  std::size_t box_, slot_;
+  g3::BattleStats stats_;
+  int level_ = 0, dex_ = 0;
+  unsigned markings_ = 0;
+  std::string species_, name_, lang_, nature_, ability_, item_, ot_, id_;
+  std::string memo_prefix_, memo_place_, memo_tail_, characteristic_;
+  std::string move_names_[4];
+  brls::Image* sprite_ = nullptr;
+  brls::Image* prev_ = nullptr;
+  brls::Image* next_ = nullptr;
+  brls::Image* ball_ = nullptr;
+  brls::Image* head_type_ = nullptr;
+  brls::Image* move_type_[4] = {};
+  GenderIcon* gender_ = nullptr;
+};
+
+class SummaryActivity : public brls::Activity {
+ public:
+  LogScreen log_screen_{"SummaryActivity"};
+
+  SummaryActivity(g3::BoxPokemon mon, BoxSource* source, std::size_t box,
+                  std::size_t slot)
+      : mon_(std::move(mon)), source_(source), box_(box), slot_(slot) {}
+
+  brls::View* createContentView() override {
+    auto* c = new SummaryContent(mon_, source_, box_, slot_);
+    c->setFocusable(true);
+    c->registerAction(
+        "Voltar", brls::BUTTON_B,
+        [](brls::View*) {
+          brls::Application::popActivity();
+          return true;
+        },
+        false);
+    c->registerAction(
+        "Anterior", brls::BUTTON_LB,
+        [c](brls::View*) { return c->Nav(-1); }, false);
+    c->registerAction(
+        "Proximo", brls::BUTTON_RB,
+        [c](brls::View*) { return c->Nav(+1); }, false);
+    return c;
+  }
+
+ private:
+  g3::BoxPokemon mon_;
+  BoxSource* source_;
+  std::size_t box_, slot_;
+};
+
+void ShowSummary(const g3::BoxPokemon& mon, BoxSource* source, std::size_t box,
+                 std::size_t slot) {
+  NLOG_NAV("abre summary de %s (caixa %zu slot %zu)",
+           DisplaySpecies(mon).c_str(), box, slot);
+  brls::Application::pushActivity(new SummaryActivity(mon, source, box, slot));
+}
+
+// Cartao da visao geral (spec 105): substitui a barra de status enquanto o
+// painel ativo mostra caixas. Desenha o cartao central (faixa teal com o nome
+// da caixa + corpo branco com a contagem) e, a esquerda, o tooltip com os
+// mini-sprites do conteudo da caixa sob o cursor — como na referencia.
+class BoxOverviewCard : public brls::View {
+ public:
+  void Set(const std::string& name, int count,
+           std::vector<std::string> sprites, bool left_side) {
+    name_ = name;
+    count_ = count;
+    sprites_ = std::move(sprites);
+    left_side_ = left_side;
+  }
+  void Clear() { name_.clear(); sprites_.clear(); }
+
+  void draw(NVGcontext* vg, float x, float y, float /*w*/, float /*h*/,
+            brls::Style, brls::FrameContext*) override {
+    if (name_.empty()) return;
+    nvgFontFaceId(vg, brls::Application::getDefaultFont());
+
+    // O overlay e 1x1 (desenha fora do proprio retangulo, como o
+    // BlockOverflow): as medidas saem da tela logica de 1280x720.
+    const float w = 1280.0f, h = 720.0f - 44.0f;  // 44 = faixa da legenda
+
+    // Cartao central: teal em cima, branco embaixo (referencia).
+    const float cw = 320.0f, cx = x + w / 2 - cw / 2;
+    const float head_y = y + h - 76.0f;
+    DrawSoftShadow(vg, cx, head_y, cw, 70.0f, 10.0f);
+    nvgBeginPath(vg);
+    nvgRoundedRectVarying(vg, cx, head_y, cw, 34.0f, 10.0f, 10.0f, 0, 0);
+    nvgFillColor(vg, kBoxBarOn);
+    nvgFill(vg);
+    nvgBeginPath(vg);
+    nvgRoundedRectVarying(vg, cx, head_y + 34.0f, cw, 36.0f, 0, 0, 10.0f,
+                          10.0f);
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, 240));
+    nvgFill(vg);
+    nvgFontSize(vg, 20.0f);
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+    nvgFillColor(vg, kWhite);
+    nvgText(vg, cx + cw / 2, head_y + 17.0f, name_.c_str(), nullptr);
+    nvgFillColor(vg, kTextPrimary);
+    const std::string body =
+        std::to_string(count_) + "/" + std::to_string(kSlotsPerBox);
+    nvgText(vg, cx + cw / 2, head_y + 52.0f, body.c_str(), nullptr);
+
+    // Tooltip de conteudo: grade 6x5 de mini-sprites, no canto do MESMO
+    // lado do painel em visao geral (dono, 2026-08-17).
+    if (sprites_.empty()) return;
+    const float cell = 34.0f, pad = 10.0f;
+    const float tw = kCols * cell + pad * 2;
+    const float th = kRows * cell + pad * 2;
+    const float tx = left_side_ ? x + 16.0f : x + w - tw - 16.0f;
+    const float ty = y + h - th - 4.0f;
+    DrawSoftShadow(vg, tx, ty, tw, th, 14.0f);
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, tx, ty, tw, th, 14.0f);
+    nvgFillColor(vg, nvgRGBA(255, 255, 255, 240));
+    nvgFill(vg);
+    for (std::size_t i = 0; i < sprites_.size() && i < kSlotsPerBox; ++i) {
+      if (sprites_[i].empty()) continue;
+      const int tex = Handle(vg, sprites_[i]);
+      if (tex <= 0) continue;
+      const float sx = tx + pad + (i % kCols) * cell;
+      const float sy = ty + pad + (i / kCols) * cell;
+      NVGpaint p = nvgImagePattern(vg, sx, sy, cell, cell, 0, tex, 1.0f);
+      nvgBeginPath(vg);
+      nvgRect(vg, sx, sy, cell, cell);
+      nvgFillPaint(vg, p);
+      nvgFill(vg);
+    }
+  }
+
+ private:
+  // Cache de textura por caminho ABSOLUTO — o SlotIconHandle do SlotCell
+  // prefixa o romfs de UI, e aqui o caminho e o do sprite de especie.
+  static int Handle(NVGcontext* vg, const std::string& file) {
+    struct Cached {
+      std::string file;
+      int handle;
+    };
+    static std::vector<Cached> cache;
+    for (const auto& c : cache) {
+      if (c.file == file) return c.handle;
+    }
+    const int handle = nvgCreateImage(vg, file.c_str(), 0);
+    cache.push_back({file, handle});
+    return handle;
+  }
+
+  std::string name_;
+  int count_ = 0;
+  bool left_side_ = true;
+  std::vector<std::string> sprites_;
+};
+
 class BoxActivity : public brls::Activity {
  public:
   LogScreen log_screen_{"BoxActivity"};
@@ -4613,7 +5727,7 @@ class BoxActivity : public brls::Activity {
           cursor_ = i;
           OnCursorMoved();
         },
-        kNestId, &session_);
+        kNestId, &session_, [this] { ToggleOverview(left_); });
     right_ = MakePanel(
         save_, /*accent=*/false,
         [this](std::size_t i) {
@@ -4621,7 +5735,11 @@ class BoxActivity : public brls::Activity {
           cursor_ = i;
           OnCursorMoved();
         },
-        kSaveId, &session_);
+        kSaveId, &session_, [this] { ToggleOverview(right_); });
+    // Os avisos em repouso comparam contra o jogo do SAVE ABERTO (spec 104),
+    // nos DOIS paineis — e o que faz um Pokemon parado no NestBox avisar que
+    // nao entra no save antes de o jogador tentar move-lo.
+    left_.ref_game = right_.ref_game = save_ ? save_->GameId() : cp::Game::kCount;
     // A borda da grade PARA (rodada 8). Trocar de caixa e exclusividade do
     // L/R: deixar a lateral virar pagina fazia o cursor "escapar" da caixa
     // sem o jogador pedir.
@@ -4641,9 +5759,22 @@ class BoxActivity : public brls::Activity {
 
     root->addView(panels);
 
-    root->addView(MakeStatsBar());
+    statsCard_ = MakeStatsBar();
+    root->addView(statsCard_);
     // Legenda do rodape (spec 050): esta tela era a unica sem ela.
-    root->addView(MakeLegendBar(/*back=*/true, &backLabel_));
+    root->addView(MakeLegendBar(/*back=*/true, &backLabel_,
+                                std::string(kGlyphY) + "  Trocar"));
+
+    // Cartao da visao geral (spec 105): overlay ABSOLUTE cobrindo a tela —
+    // ele se desenha na regiao da barra de status, que some enquanto o
+    // painel ativo mostra caixas.
+    ovCard_ = new BoxOverviewCard();
+    ovCard_->setPositionType(brls::PositionType::ABSOLUTE);
+    ovCard_->setPositionTop(0);
+    ovCard_->setPositionLeft(0);
+    ovCard_->setWidth(1);   // desenha em coordenada absoluta, como o
+    ovCard_->setHeight(1);  // BlockOverflow acima
+    root->addView(ovCard_);
 
     RegisterActions(root);
     Refresh();
@@ -4676,16 +5807,12 @@ class BoxActivity : public brls::Activity {
     left_block->setWidth(kTopBarSideBlock);
     left_block->setAlignItems(brls::AlignItems::CENTER);
 
-    auto* icon = new brls::Box(brls::Axis::ROW);
-    icon->setSize(brls::Size(52, 52));
-    icon->setCornerRadius(16);
-    icon->setBackgroundColor(kDarkBar);
-    icon->setMarginRight(24);
-    left_block->addView(icon);
-
+    // O quadrado escuro que segurava o lugar do icone saiu (dono,
+    // 2026-08-17) — o titulo abre a barra sozinho.
     auto* title = new brls::Label();
-    // Mesmo texto e tamanho da barra da tela anterior (main.cpp:5211).
-    title->setText("POKEMON");
+    // Mesmo texto e tamanho da barra da tela anterior. Acento como no HOME
+    // (spec 105) — a fonte padrao tem o glifo.
+    title->setText("POKÉMON");
     title->setFontSize(24);
     title->setTextColor(kTextPrimary);
     left_block->addView(title);
@@ -4781,161 +5908,249 @@ class BoxActivity : public brls::Activity {
   // Os rotulos ficam SEMPRE visiveis; so os valores esvaziam quando o slot
   // esta vazio (imagem 1 da referencia). Uma barra que some inteira faria a
   // tela pular de altura a cada movimento do cursor.
+  // Geometria MEDIDA na captura do HOME em 1280x720 (2026-08-17, pedido
+  // "minucioso" do dono): faixa teal de 26px comecando no topo da barra;
+  // bola da captura centrada em x=47; nome em x=75; sexo centrado em x=237;
+  // "Lv." em x=300 e o numero em x=340; badge reservado em x=420; OT
+  // centrado na folga; [ENG] terminando em ~950; insignia em ~985; seis
+  // marcadores de x~1032 a ~1240 (passo ~42). Grade: tarjas em x=30 (75 de
+  // largura) e x=340/505/670 (108); golpes em x=845 e x=1050; logo
+  // translucida encostada na direita.
+  // O cartao da barra (dono, 2026-08-17): 10px de folga nas laterais,
+  // cantos arredondados, sombra de elevacao, header #38B6AB e corpo
+  // #EAF9F2. O desenho e do proprio cartao — header e grade ficam
+  // transparentes para nao pintar por cima dos cantos.
+  class StatsCard : public brls::Box {
+    void draw(NVGcontext* vg, float x, float y, float w, float h,
+              brls::Style style, brls::FrameContext* ctx) override {
+      const float r = 14.0f;
+      DrawSoftShadow(vg, x, y, w, h, r);
+      nvgBeginPath(vg);
+      nvgRoundedRect(vg, x, y, w, h, r);
+      nvgFillColor(vg, kStatusBodyBg);
+      nvgFill(vg);
+      nvgBeginPath(vg);
+      nvgRoundedRectVarying(vg, x, y, w, 26.0f, r, r, 0.0f, 0.0f);
+      nvgFillColor(vg, kStatusHeadBg);
+      nvgFill(vg);
+      brls::Box::draw(vg, x, y, w, h, style, ctx);
+    }
+  };
+
   brls::Box* MakeStatsBar() {
-    auto* bar = new brls::Box(brls::Axis::COLUMN);
+    auto* bar = new StatsCard();
+    bar->setAxis(brls::Axis::COLUMN);
     bar->setHeight(104);
+    // O cartao nao encosta nas bordas; 2px embaixo para desgrudar do rodape
+    // "Ajuda" (pedido do dono, 2026-08-17).
+    bar->setMargins(0, 10, 2, 10);
 
     // --- Linha 1: a faixa teal de identificacao, texto branco (referencia).
-    // Largura total, sem padding lateral do bar — o padding e da faixa.
+    // Coordenadas internas = as da captura menos os 10px da margem.
     auto* head = new StatusHead();
     head->setAxis(brls::Axis::ROW);
-    head->setHeight(34);
+    head->setHeight(26);  // medido: y 577-603 na captura
     head->setAlignItems(brls::AlignItems::CENTER);
-    head->setPadding(0, 40, 0, 64);  // 64: espaco da pokebola desenhada
-    head->setBackgroundColor(kStatusHeadBg);
+    head->setPadding(0, 22, 0, 65);
+    statusHead_ = head;
 
-    // shrink 0 nos campos da esquerda: quando statInfo_ traz mensagem longa
-    // ("Segurando — A solta..."), o yoga encolhia TODOS os labels da linha e
-    // o nome virava "Bin...". Quem cede espaco e so o info.
+    // Sprite da pokebola da captura (spec 099), no lugar da vetorial quando a
+    // bola e conhecida. ABSOLUTE, centro em x=47 como na captura.
+    statBall_ = new brls::Image();
+    statBall_->setPositionType(brls::PositionType::ABSOLUTE);
+    statBall_->setPositionLeft(27);
+    statBall_->setPositionTop(3);
+    statBall_->setSize(brls::Size(20, 20));
+    statBall_->setScalingType(brls::ImageScalingType::FIT);
+    statBall_->setVisibility(brls::Visibility::INVISIBLE);
+    head->addView(statBall_);
+
+    // Nome com largura FIXA (x 75-229): e o que poe o sexo sempre em x=237,
+    // como na captura — campo de largura livre deslocaria tudo a direita.
     statName_ = new brls::Label();
-    statName_->setFontSize(21);
+    statName_->setFontSize(18);
     statName_->setTextColor(kWhite);
-    statName_->setMarginRight(18);
+    statName_->setWidth(154);
+    statName_->setSingleLine(true);
     statName_->setShrink(0.0f);
     head->addView(statName_);
 
-    statGender_ = new brls::Label();
-    statGender_->setFontSize(19);
-    statGender_->setMarginRight(18);
+    statGender_ = new GenderIcon();
+    statGender_->setSize(brls::Size(17, 17));
+    statGender_->setShrink(0.0f);
     head->addView(statGender_);
 
+    // "Lv." menor e mais claro que o numero, como na captura (x=300 / x=340).
+    lvTag_ = new brls::Label();
+    lvTag_->setText("Lv.");
+    lvTag_->setFontSize(15);
+    lvTag_->setTextColor(nvgRGBA(255, 255, 255, 215));
+    lvTag_->setMarginLeft(55);
+    lvTag_->setShrink(0.0f);
+    head->addView(lvTag_);
+
     statLevel_ = new brls::Label();
-    statLevel_->setFontSize(19);
+    statLevel_->setFontSize(18);
     statLevel_->setTextColor(kWhite);
-    statLevel_->setMarginRight(18);
+    statLevel_->setWidth(60);  // x 340-400; numero de ate 3 digitos cabe
+    statLevel_->setMarginLeft(12);
+    statLevel_->setSingleLine(true);
     statLevel_->setShrink(0.0f);
     head->addView(statLevel_);
 
+    // Icones de TIPO no lugar do badge da captura (x~410): e o que o HOME
+    // mostra ali (o cinza do Rattata e o icone Normal). Ate dois — especies
+    // com dois tipos mostram os dois (pedido do dono, spec 099). Arte:
+    // partywhale/pokemon-type-icons, rasterizada em romfs/ui/types.
+    for (int i = 0; i < 2; ++i) {
+      typeIcons_[i] = new brls::Image();
+      typeIcons_[i]->setSize(brls::Size(20, 20));
+      typeIcons_[i]->setMarginLeft(i == 0 ? 10 : 8);
+      typeIcons_[i]->setScalingType(brls::ImageScalingType::FIT);
+      typeIcons_[i]->setShrink(0.0f);
+      typeIcons_[i]->setVisibility(brls::Visibility::INVISIBLE);
+      head->addView(typeIcons_[i]);
+    }
+
+    // O apelido saiu da faixa (a referencia nao tem o campo): statName_ ja
+    // mostra o apelido quando existe. O Label fica GONE para os caminhos que
+    // ainda escrevem nele nao quebrarem.
     statSub_ = new brls::Label();
-    statSub_->setFontSize(19);
-    statSub_->setTextColor(nvgRGBA(255, 255, 255, 210));
-    statSub_->setShrink(0.0f);
+    statSub_->setVisibility(brls::Visibility::GONE);
     head->addView(statSub_);
 
-    auto* head_gap = new brls::Box(brls::Axis::ROW);
-    head_gap->setGrow(1.0f);
-    head->addView(head_gap);
+    // Da metade para a direita TUDO e ABSOLUTE, nas posicoes da captura.
+    // A primeira versao usava dois espacadores grow(1) para centrar o OT, e
+    // o relayout do borealis apos um setText colapsava os grow — o primeiro
+    // desenho saia certo e o redesenho empilhava tudo a esquerda (relato do
+    // dono, 2026-08-17). Posicao fixa nao re-mede nada.
 
-    // Treinador original no CENTRO da faixa, como na referencia do HOME
-    // (spec 098). O rotulo "OT" esmaecido substitui o icone de pessoa.
-    auto* ot_tag = new brls::Label();
-    ot_tag->setText("OT");
-    ot_tag->setFontSize(15);
-    ot_tag->setTextColor(nvgRGBA(255, 255, 255, 170));
-    ot_tag->setMarginRight(8);
-    ot_tag->setShrink(0.0f);
-    head->addView(ot_tag);
-    otTag_ = ot_tag;
+    // Treinador original com o icone de pessoa (nanovg) — icone em x=620.
+    otTag_ = new PersonIcon();
+    otTag_->setPositionType(brls::PositionType::ABSOLUTE);
+    otTag_->setPositionLeft(610);
+    otTag_->setPositionTop(5);
+    otTag_->setSize(brls::Size(16, 16));
+    head->addView(otTag_);
 
     statOt_ = new brls::Label();
-    statOt_->setFontSize(19);
+    statOt_->setPositionType(brls::PositionType::ABSOLUTE);
+    statOt_->setPositionLeft(634);
+    statOt_->setPositionTop(3);
+    statOt_->setFontSize(17);
     statOt_->setTextColor(kWhite);
     statOt_->setSingleLine(true);
-    statOt_->setShrink(0.0f);
     head->addView(statOt_);
 
-    auto* head_gap2 = new brls::Box(brls::Axis::ROW);
-    head_gap2->setGrow(1.0f);
-    head->addView(head_gap2);
-
-    // Tag de idioma [ENG]: pilula de borda branca, como no HOME.
+    // Tag de idioma [ENG] (x=915, termina em ~950): borda fina, texto 12.
     langChip_ = new brls::Box(brls::Axis::ROW);
-    langChip_->setHeight(22);
-    langChip_->setCornerRadius(5);
+    langChip_->setPositionType(brls::PositionType::ABSOLUTE);
+    langChip_->setPositionLeft(905);
+    langChip_->setPositionTop(5);
+    langChip_->setHeight(16);
+    langChip_->setCornerRadius(3);
     langChip_->setBorderColor(kWhite);
-    langChip_->setBorderThickness(2);
-    langChip_->setPadding(0, 8, 0, 8);
+    langChip_->setBorderThickness(1.5f);
+    langChip_->setPadding(0, 5, 0, 5);
     langChip_->setAlignItems(brls::AlignItems::CENTER);
-    langChip_->setMarginRight(10);
     statLang_ = new brls::Label();
-    statLang_->setFontSize(14);
+    statLang_->setFontSize(12);
     statLang_->setTextColor(kWhite);
     langChip_->addView(statLang_);
     head->addView(langChip_);
 
-    // Sigla do jogo de origem, no lugar da insignia grafica (decisao do dono,
-    // spec 098): pilula redonda com a sigla.
+    // Insignia do jogo (circulo em x=976): sigla no lugar do icone
+    // (decisao do dono, spec 098).
     gameChip_ = new brls::Box(brls::Axis::ROW);
-    gameChip_->setHeight(22);
-    gameChip_->setCornerRadius(11);
+    gameChip_->setPositionType(brls::PositionType::ABSOLUTE);
+    gameChip_->setPositionLeft(966);
+    gameChip_->setPositionTop(4);
+    gameChip_->setHeight(17);
+    gameChip_->setCornerRadius(8.5f);
     gameChip_->setBorderColor(kWhite);
-    gameChip_->setBorderThickness(2);
-    gameChip_->setPadding(0, 8, 0, 8);
+    gameChip_->setBorderThickness(1.5f);
+    gameChip_->setPadding(0, 4, 0, 4);
     gameChip_->setAlignItems(brls::AlignItems::CENTER);
-    gameChip_->setMarginRight(14);
+    gameChip_->setJustifyContent(brls::JustifyContent::CENTER);
     statGame_ = new brls::Label();
-    statGame_->setFontSize(14);
+    statGame_->setFontSize(11);
     statGame_->setTextColor(kWhite);
     gameChip_->addView(statGame_);
     head->addView(gameChip_);
 
-    // Marcadores da caixa: espaco reservado, esmaecido (nao funcionais nesta
-    // spec — "podemos deixar so o espaco", pedido do dono).
-    statMarks_ = new brls::Label();
-    statMarks_->setText("○ △ □ ♡ ☆ ◇");
-    statMarks_->setFontSize(16);
-    statMarks_->setTextColor(nvgRGBA(255, 255, 255, 110));
-    statMarks_->setShrink(0.0f);
+    // Marcadores (x ~1032-1240, passo ~42): espaco reservado, cheios e
+    // esmaecidos como na captura. Nanovg — a fonte nao tem os glifos.
+    statMarks_ = new MarkStrip();
+    statMarks_->setPositionType(brls::PositionType::ABSOLUTE);
+    statMarks_->setPositionRight(22);
+    statMarks_->setPositionTop(3);
+    statMarks_->setSize(brls::Size(250, 20));
     head->addView(statMarks_);
 
-    // Mensagem de contexto (segurando, bloqueado, aviso de golpe) fica na
-    // ponta direita desta linha, onde antes ficava o texto solto.
+    // Mensagem de contexto (segurando, bloqueado, aviso de golpe) na ponta
+    // direita, no lugar dos marcadores — SetInfo() esconde os marcadores
+    // enquanto ha mensagem, senao os dois se sobreporiam.
     statInfo_ = new brls::Label();
-    statInfo_->setFontSize(18);
+    statInfo_->setPositionType(brls::PositionType::ABSOLUTE);
+    statInfo_->setPositionRight(22);
+    statInfo_->setPositionTop(4);
+    statInfo_->setFontSize(16);
     statInfo_->setTextColor(kWhite);
     statInfo_->setSingleLine(true);
-    statInfo_->setMarginLeft(14);
     head->addView(statInfo_);
     bar->addView(head);
 
     // --- Linhas 2 e 3: a grade de campos, sobre a faixa clara ---
+    // Medidas da captura: tarjas em x=30 (col1), x=340/505/670 (stats);
+    // golpes em x=845 e x=1050; linhas com passo de 36px.
     auto* grid = new brls::Box(brls::Axis::ROW);
     grid->setGrow(1.0f);
     grid->setAlignItems(brls::AlignItems::CENTER);
-    grid->setPadding(0, 40, 0, 40);
-    // Translucida: sobre o fundo saturado um branco forte vira faixa leitosa.
-    grid->setBackgroundColor(nvgRGBA(255, 255, 255, 90));
+    grid->setPadding(0, 8, 0, 20);
 
-    // Coluna 1: natureza e habilidade.
+    // Coluna 1: natureza e habilidade (tarja de 75, valor em x=120).
     auto* col1 = new brls::Box(brls::Axis::COLUMN);
-    col1->setWidth(300);
-    col1->addView(MakeStatRow("Nature", &statNature_));
-    col1->addView(MakeStatRow("Ability", &statAbility_));
+    col1->setWidth(310);
+    col1->addView(MakeStatRow("Nature", &statNature_, 75));
+    col1->addView(MakeStatRow("Ability", &statAbility_, 75));
     grid->addView(col1);
 
-    // Colunas 2-4: os seis stats, dois por coluna.
+    // Colunas 2-4: os seis stats, dois por coluna (tarja de 108).
     static const char* kStatLabels[3][2] = {
         {"HP", "Speed"}, {"Attack", "Sp. Atk"}, {"Defense", "Sp. Def"}};
     for (int c = 0; c < 3; ++c) {
       auto* col = new brls::Box(brls::Axis::COLUMN);
       col->setWidth(165);
-      col->addView(MakeStatRow(kStatLabels[c][0], &statValues_[c * 2]));
-      col->addView(MakeStatRow(kStatLabels[c][1], &statValues_[c * 2 + 1]));
+      col->addView(MakeStatRow(kStatLabels[c][0], &statValues_[c * 2], 108));
+      col->addView(MakeStatRow(kStatLabels[c][1], &statValues_[c * 2 + 1], 108));
       grid->addView(col);
     }
 
     // Colunas 5-6: os quatro golpes, sem rotulo (o proprio nome ja diz).
+    // Cada golpe e uma ROW [nome, icone]: o icone amarelo do aviso de golpe
+    // ausente (spec 104) mora ao lado do nome, na altura do texto.
     for (int c = 0; c < 2; ++c) {
       auto* col = new brls::Box(brls::Axis::COLUMN);
-      col->setWidth(170);
+      col->setWidth(205);
+      if (c == 0) col->setMarginLeft(10);  // primeiro golpe em x=845
       for (int r = 0; r < 2; ++r) {
+        auto* row = new brls::Box(brls::Axis::ROW);
+        row->setHeight(36);
+        row->setAlignItems(brls::AlignItems::CENTER);
+
         auto* lbl = new brls::Label();
         lbl->setFontSize(18);
         lbl->setTextColor(kTextPrimary);
-        lbl->setHeight(26);
         lbl->setSingleLine(true);
         statMoves_[c * 2 + r] = lbl;
-        col->addView(lbl);
+        row->addView(lbl);
+
+        auto* warn = new MoveWarnIcon();
+        warn->setMarginLeft(8);
+        statMoveWarn_[c * 2 + r] = warn;
+        row->addView(warn);
+
+        col->addView(row);
       }
       grid->addView(col);
     }
@@ -4943,15 +6158,15 @@ class BoxActivity : public brls::Activity {
     bar->addView(grid);
 
     // Logo do jogo da caixa ativa, translucida na ponta direita da grade,
-    // como a logo do HOME na captura de referencia (spec 098). ABSOLUTE para
-    // nao disputar largura com as colunas; some no slot vazio.
+    // como a logo do HOME na captura (x 1165-1270, centro y~645). ABSOLUTE
+    // para nao disputar largura com as colunas; some no slot vazio.
     statLogo_ = new brls::Image();
     statLogo_->setPositionType(brls::PositionType::ABSOLUTE);
-    statLogo_->setPositionTop(40);
-    statLogo_->setPositionRight(24);
-    statLogo_->setSize(brls::Size(96, 58));
+    statLogo_->setPositionTop(39);
+    statLogo_->setPositionRight(8);
+    statLogo_->setSize(brls::Size(105, 58));
     statLogo_->setScalingType(brls::ImageScalingType::FIT);
-    statLogo_->setAlpha(0.45f);
+    statLogo_->setAlpha(0.5f);
     statLogo_->setVisibility(brls::Visibility::INVISIBLE);
     bar->addView(statLogo_);
     return bar;
@@ -4959,36 +6174,43 @@ class BoxActivity : public brls::Activity {
 
   // Faixa de identificacao: fundo teal + a pokebola vetorial na ponta
   // esquerda, como na referencia. So o desenho — o conteudo e dos Labels.
+  // A vetorial e o FALLBACK: com a bola da captura conhecida, o sprite real
+  // (romfs/ui/balls, spec 099) entra no lugar e ela nao desenha.
   class StatusHead : public brls::Box {
+   public:
+    bool vector_ball = true;
+
+   private:
     void draw(NVGcontext* vg, float x, float y, float w, float h,
               brls::Style style, brls::FrameContext* ctx) override {
       brls::Box::draw(vg, x, y, w, h, style, ctx);
-      DrawPokeball(vg, x + 38.0f, y + h / 2, 11.0f);
+      if (vector_ball) DrawPokeball(vg, x + 37.0f, y + h / 2, 10.0f);
     }
   };
 
   // Uma dupla rotulo + valor. O rotulo e azulado e fixo; o valor muda com o
-  // cursor. Devolve a linha e guarda o Label do valor em `out`.
-  brls::Box* MakeStatRow(const char* label, brls::Label** out) {
+  // cursor. Devolve a linha e guarda o Label do valor em `out`. A largura da
+  // tarja vem da captura: 75 na coluna 1, 108 nas de stats.
+  brls::Box* MakeStatRow(const char* label, brls::Label** out, float chip_w) {
     auto* row = new brls::Box(brls::Axis::ROW);
-    row->setHeight(26);
+    row->setHeight(36);
     row->setAlignItems(brls::AlignItems::CENTER);
 
     // Tarja clara atras do rotulo, como na captura do HOME (spec 098): fundo
     // #DBF1EE arredondado, texto azul centrado.
     auto* chip = new brls::Box(brls::Axis::ROW);
-    chip->setWidth(84);
-    chip->setHeight(22);
-    chip->setCornerRadius(4);
-    chip->setBackgroundColor(nvgRGB(0xDB, 0xF1, 0xEE));
+    chip->setWidth(chip_w);
+    chip->setHeight(26);
+    chip->setCornerRadius(5);
+    chip->setBackgroundColor(kStatusChipBg);
     chip->setJustifyContent(brls::JustifyContent::CENTER);
     chip->setAlignItems(brls::AlignItems::CENTER);
-    chip->setMarginRight(12);
+    chip->setMarginRight(15);
     chip->setShrink(0.0f);
 
     auto* lbl = new brls::Label();
     lbl->setText(label);
-    lbl->setFontSize(18);
+    lbl->setFontSize(17);
     lbl->setTextColor(kStatLabel);
     chip->addView(lbl);
     row->addView(chip);
@@ -5080,32 +6302,17 @@ class BoxActivity : public brls::Activity {
         },
         false);
     root->registerAction(
-        "Detalhes", brls::BUTTON_Y,
-        [this](brls::View*) {
-          const BoxPanel& p = Active();
-          // Pelo overlay: detalhar o que a celula mostra, nao o que estava no
-          // save antes da movimentacao.
-          const g3::BoxPokemon mon = p.Effective(cursor_);
-          // Detalhes calculam stats pelas tabelas gen3; para fontes de outra
-          // geracao (national_dex preenchido) ainda nao ha tela de detalhes.
-          if (!mon.empty() && mon.national_dex != 0) {
-            NLOG_NAV("Y ignorado: sem tela de detalhes para dex %d",
-                     mon.national_dex);
-            return true;
-          }
-          if (mon.empty()) {
-            NLOG_NAV("Y ignorado: slot %zu vazio", cursor_);
-            return true;
-          }
-          NLOG_NAV("Y -> DetailActivity (%s)", DisplaySpecies(mon).c_str());
-          brls::Application::pushActivity(new DetailActivity(mon));
-          return true;
-        },
-        false);
-    root->registerAction(
         "Caixa anterior", brls::BUTTON_LB,
         [this](brls::View*) {
           BoxPanel& p = Active();
+          // Visao geral: L/R viram a PAGINA de caixas (spec 105).
+          if (p.overview) {
+            const std::size_t pg = p.OverviewPages();
+            p.ov_page = (p.ov_page + pg - 1) % pg;
+            NLOG_NAV("L pagina da visao geral: %zu/%zu", p.ov_page + 1, pg);
+            Refresh();
+            return true;
+          }
           // Marcas e area valem so na caixa corrente (specs 021 e 088) — mas
           // um bloco JA levantado atravessa: carregar Pokemon de uma caixa
           // para outra e justamente para o que ele serve.
@@ -5123,6 +6330,13 @@ class BoxActivity : public brls::Activity {
         "Proxima caixa", brls::BUTTON_RB,
         [this](brls::View*) {
           BoxPanel& p = Active();
+          if (p.overview) {
+            const std::size_t pg = p.OverviewPages();
+            p.ov_page = (p.ov_page + 1) % pg;
+            NLOG_NAV("R pagina da visao geral: %zu/%zu", p.ov_page + 1, pg);
+            Refresh();
+            return true;
+          }
           if (selPhase_ != SelPhase::kSegurando) ResetSelection();
           const std::size_t from = p.box;
           p.box = (p.box + 1) % p.source->BoxCount();
@@ -5132,16 +6346,33 @@ class BoxActivity : public brls::Activity {
           return true;
         },
         false);
+    // A visao geral (spec 105) NAO tem atalho de botao: o acesso e o toque
+    // na pilula do rodape do painel, como no HOME — decisao do dono
+    // (2026-08-17). O − continua reservado ao Ajuda.
     // As setas NAO sao registradas: o borealis ja move o foco entre as celulas
     // focaveis (Box::getNextFocus). Registrar aqui competiria com ele — foi o
     // que travou o cursor na primeira tentativa.
 
     // A: pega e solta. A logica mora em box_move.h e e coberta por
     // tests/test_box_move.cpp — aqui so o gatilho.
-    root->registerAction(
-        "Mover", brls::BUTTON_A,
-        [this](brls::View*) {
+    //
+    // `swap` e o atalho do Y (spec 100): forca a semantica de TROCA e pula o
+    // menu de contexto do modo Mover, sem alterar `mode_`. O A passa false e
+    // se comporta como sempre.
+    auto pick_or_drop = [this](bool swap) {
           BoxPanel& p = Active();
+          // Visao geral (spec 105): A ABRE a caixa apontada — o painel volta
+          // a vista normal ja nela. Nenhum outro gesto atravessa.
+          if (p.overview) {
+            const std::size_t b = p.ov_page * kSlotsPerBox + cursor_;
+            if (b < p.source->BoxCount()) {
+              NLOG_NAV("visao geral: A abriu a caixa %zu", b);
+              p.box = b;
+              p.overview = false;
+              Refresh();
+            }
+            return true;
+          }
           const bx::SlotRef ref{p.source_id, p.box, cursor_};
           const g3::BoxPokemon current = p.Effective(cursor_);
 
@@ -5270,6 +6501,43 @@ class BoxActivity : public brls::Activity {
                        cp::GameName(p.source->GameId()));
               return true;
             }
+            // Verificador (spec 082, gatilho movido na spec 105): a reprovacao
+            // bloqueia a TRANSFERENCIA. Reorganizar dentro da propria fonte e
+            // livre; o erro aparece so ao soltar na OUTRA fonte. O julgamento
+            // e da fonte de ORIGEM sobre o slot de onde o Pokemon saiu — o
+            // overlay esvaziou o slot, mas a fonte continua respondendo.
+            const bx::SlotRef& from = session_.HeldFrom();
+            if (p.source_id != from.source) {
+              BoxSource* origem = from.source == kNestId ? nest_ : save_;
+              const std::string why =
+                  origem ? origem->BlockedReason(from.box, from.slot) : "";
+              if (!why.empty()) {
+                NLOG_ACT("BLOQUEADO transferir %s (%s caixa %zu slot %zu): %s",
+                         DisplaySpecies(session_.Held()).c_str(),
+                         from.source == kNestId ? "nestbox" : "save", from.box,
+                         from.slot, why.c_str());
+                NoticeDialog("Este Pokemon nao pode ser transferido.\n" + why,
+                             "Entendi");
+                return true;
+              }
+            }
+            // O mesmo gate na direcao oposta: numa TROCA cruzando fontes, o
+            // ocupante reprovado do DESTINO viajaria para a origem — e
+            // transferencia do mesmo jeito, so que do outro lado.
+            if (p.source_id != from.source && !current.empty()) {
+              const std::string why =
+                  p.source->BlockedReason(p.box, cursor_);
+              if (!why.empty()) {
+                NLOG_ACT("BLOQUEADO trocar com %s reprovado (caixa %zu "
+                         "slot %zu): %s",
+                         DisplaySpecies(current).c_str(), p.box, cursor_,
+                         why.c_str());
+                NoticeDialog(
+                    "O Pokemon deste espaco nao pode ser transferido.\n" + why,
+                    "Entendi");
+                return true;
+              }
+            }
             // Portoes de formato (spec 086): os dois cruzamentos que gravariam
             // dado mutilado. O NestBox armazena slots gen3 de 80 bytes — um
             // Pokemon moderno depositado ali perderia tudo que o raw nao
@@ -5300,7 +6568,7 @@ class BoxActivity : public brls::Activity {
             }
             // Modo Mover recusa soltar sobre ocupado; e o que o diferencia do
             // modo Trocar (TD-02 da spec 031).
-            const bool allow_swap = mode_ == bx::CursorMode::kSwap;
+            const bool allow_swap = swap || mode_ == bx::CursorMode::kSwap;
             const std::string held = DisplaySpecies(session_.Held());
             // O RETORNO do Drop e quem diz se funcionou. Ate a spec 087 isto
             // olhava `Holding()`, que continuava true numa troca bem-sucedida
@@ -5316,20 +6584,11 @@ class BoxActivity : public brls::Activity {
                      bx::CursorModeName(mode_),
                      current.empty() ? "vazio" : DisplaySpecies(current).c_str());
           } else {
-            // Pokemon reprovado pelo verificador nao SAI da caixa (spec 082).
-            // Ele continua listado e navegavel — o bloqueio e da
-            // transferencia, nunca da leitura. A celula ja esta esmaecida com
-            // o alerta desde que a caixa abriu; o aviso aqui diz o motivo, que
-            // a marca sozinha nao conta.
-            const std::string why = p.source->BlockedReason(p.box, cursor_);
-            if (!why.empty()) {
-              NLOG_ACT("BLOQUEADO pegar %s (caixa %zu slot %zu): %s",
-                       DisplaySpecies(current).c_str(), p.box, cursor_,
-                       why.c_str());
-              NoticeDialog("Este Pokemon nao pode ser transferido.\n" + why,
-                           "Entendi");
-              return true;
-            }
+            // Pokemon reprovado pelo verificador PODE ser pego (spec 105): o
+            // bloqueio e da transferencia, nunca da leitura nem do gesto
+            // (spec 082). A recusa que morava aqui impedia ate o menu de
+            // contexto e os detalhes — ela desceu para o soltar, onde a
+            // transferencia de fato acontece.
             if (current.empty()) {
               NLOG_NAV("A em slot vazio (caixa %zu slot %zu)", p.box, cursor_);
               session_.Pick(ref, current);  // no-op: Pick recusa slot vazio
@@ -5344,10 +6603,12 @@ class BoxActivity : public brls::Activity {
             // So dois itens por enquanto: os outros quatro da folha (resumo,
             // marcacoes, visual, liberar) ficam de fora ate terem para onde
             // ir. Item que nao faz nada e pior que item ausente.
-            if (mode_ == bx::CursorMode::kMove) {
+            if (!swap && mode_ == bx::CursorMode::kMove) {
               NLOG_NAV("A -> menu de contexto de %s (caixa %zu slot %zu)",
                        DisplaySpecies(current).c_str(), p.box, cursor_);
               const std::string nome = DisplaySpecies(current);
+              BoxSource* src = p.source;
+              const std::size_t caixa = p.box, slot = cursor_;
               ShowContextMenu(
                   p.cells[cursor_]->getFrame(),
                   {{"Mover",
@@ -5355,6 +6616,13 @@ class BoxActivity : public brls::Activity {
                       NLOG_ACT("menu: PEGOU %s", nome.c_str());
                       session_.Pick(ref, current);
                       Refresh();
+                    }},
+                   // Check Summary do HOME (spec 103).
+                   {"Ver detalhes",
+                    [current, src, caixa, slot] {
+                      NLOG_NAV("menu: summary de %s",
+                               DisplaySpecies(current).c_str());
+                      ShowSummary(current, src, caixa, slot);
                     }},
                    {"Sair", [] { NLOG_NAV("menu: fechou sem acao"); }}});
               return true;
@@ -5368,6 +6636,25 @@ class BoxActivity : public brls::Activity {
           }
           Refresh();
           return true;
+    };
+    root->registerAction(
+        "Mover", brls::BUTTON_A,
+        [pick_or_drop](brls::View*) { return pick_or_drop(false); }, false);
+
+    // Y: atalho de troca (spec 100). Faz o mesmo gesto do A no modo Trocar —
+    // levanta o Pokemon e solta trocando com o ocupante — mas NAO muda o modo
+    // do cursor: terminado o gesto, a barra de modos continua onde estava.
+    // Substituiu o "Detalhes" (TD-01 da spec 100).
+    root->registerAction(
+        "Trocar", brls::BUTTON_Y,
+        [this, pick_or_drop](brls::View*) {
+          // No modo Selecao o A tem gesto proprio de tres fases (spec 088); o
+          // atalho nao o atravessa.
+          if (mode_ == bx::CursorMode::kSelect) {
+            NLOG_NAV("Y ignorado: modo Selecao tem gesto proprio");
+            return true;
+          }
+          return pick_or_drop(true);
         },
         false);
 
@@ -5403,6 +6690,14 @@ class BoxActivity : public brls::Activity {
     root->registerAction(
         "Voltar", brls::BUTTON_B,
         [this](brls::View*) {
+          // B sai da visao geral sem trocar de caixa (spec 105) — antes de
+          // qualquer outro significado do botao.
+          if (Active().overview) {
+            NLOG_NAV("B saiu da visao geral");
+            Active().overview = false;
+            Refresh();
+            return true;
+          }
           // B cancela a selecao em qualquer fase, antes de tudo (spec 088):
           // enquanto se pinta a area ou se carrega o bloco, B desfaz o gesto
           // em vez de sair da tela.
@@ -5471,6 +6766,21 @@ class BoxActivity : public brls::Activity {
   }
 
   BoxPanel& Active() { return activeLeft_ ? left_ : right_; }
+
+  // Entra/sai da visao geral das caixas (spec 105) num painel. Durante um
+  // gesto (mao cheia ou selecao) o toque e ignorado — mover Pokemon sobre
+  // uma caixa fica para spec propria.
+  void ToggleOverview(BoxPanel& p) {
+    if (session_.Holding() || selPhase_ != SelPhase::kOcioso) {
+      NLOG_NAV("Espacos ignorado: gesto em curso");
+      return;
+    }
+    p.overview = !p.overview;
+    if (p.overview) p.ov_page = p.box / kSlotsPerBox;
+    NLOG_NAV("Espacos: visao geral %s (painel %s)", p.overview ? "ON" : "OFF",
+             &p == &left_ ? "esq" : "dir");
+    Refresh();
+  }
 
   // --- Area do modo Selecao (spec 088) --------------------------------------
 
@@ -5817,11 +7127,18 @@ class BoxActivity : public brls::Activity {
     // cursor: e o que faz o retangulo crescer e encolher junto com ele.
     RefreshSelectionArea();
 
-    // O B muda de significado durante a selecao: desfaz o gesto em vez de
+    // O B muda de significado durante um gesto em curso: desfaz, em vez de
     // sair da tela. O rodape acompanha, senao prometeria a acao errada.
+    //
+    // Vale para os DOIS gestos, nao so para o modo Selecao (spec 100): com um
+    // Pokemon na mao — pelo A ou pelo atalho do Y — o B tambem cancela e
+    // devolve o Pokemon ao slot de origem (`MoveSession::Cancel`). Ate aqui o
+    // rodape so trocava o texto no modo Selecao, e prometia "Voltar" enquanto
+    // o B na verdade cancelava o movimento.
     if (backLabel_) {
       const bool selecionando =
-          mode_ == bx::CursorMode::kSelect && selPhase_ != SelPhase::kOcioso;
+          session_.Holding() ||
+          (mode_ == bx::CursorMode::kSelect && selPhase_ != SelPhase::kOcioso);
       backLabel_->setText(std::string(kGlyphB) +
                           (selecionando ? "  Cancelar" : "  Voltar"));
     }
@@ -5851,6 +7168,30 @@ class BoxActivity : public brls::Activity {
 
     const BoxPanel& p = Active();
 
+    // Visao geral (spec 105): a barra de status do Pokemon SOME e da lugar
+    // ao cartao da caixa (nome + contagem) e ao tooltip com o conteudo.
+    if (p.overview) {
+      statsCard_->setVisibility(brls::Visibility::INVISIBLE);
+      const std::size_t b = p.ov_page * kSlotsPerBox + cursor_;
+      if (b < p.source->BoxCount()) {
+        std::vector<std::string> sprites(kSlotsPerBox);
+        for (std::size_t s = 0; s < kSlotsPerBox; ++s) {
+          const g3::BoxPokemon m = p.EffectiveAt(b, s);
+          if (!m.empty()) sprites[s] = SpritePath(m);
+        }
+        ovCard_->Set(p.BoxName(b), p.CountIn(b), std::move(sprites),
+                     activeLeft_);
+      } else {
+        ovCard_->Clear();
+      }
+      if (backLabel_) {
+        backLabel_->setText(std::string(kGlyphB) + "  Voltar");
+      }
+      return;
+    }
+    statsCard_->setVisibility(brls::Visibility::VISIBLE);
+    ovCard_->Clear();
+
     // Modo de selecao: o rodape mostra quantos estao marcados, que e a
     // informacao que importa enquanto se monta o bloco (spec 021).
     if (mode_ == bx::CursorMode::kSelect) {
@@ -5863,13 +7204,13 @@ class BoxActivity : public brls::Activity {
         const std::size_t larg = rc.c1 - rc.c0 + 1, alt = rc.r1 - rc.r0 + 1;
         statName_->setText("Area " + std::to_string(alt) + "x" +
                            std::to_string(larg));
-        statInfo_->setText("A pega o bloco — B cancela");
+        SetInfo("A pega o bloco — B cancela");
       } else if (selPhase_ == SelPhase::kSegurando) {
         statName_->setText(std::to_string(selShape_.size()) + " na mao");
-        statInfo_->setText("A solta o bloco — B cancela");
+        SetInfo("A solta o bloco — B cancela");
       } else {
         statName_->setText("Selecao");
-        statInfo_->setText("A comeca a area — ZL/ZR trocam de modo");
+        SetInfo("A comeca a area — ZL/ZR trocam de modo");
       }
       return;
     }
@@ -5882,16 +7223,16 @@ class BoxActivity : public brls::Activity {
       // o botao pareceria travado (spec 034).
       if (!p.FitsInPanel(session_.Held())) {
         const g3::BoxPokemon& held = session_.Held();
-        statName_->setText(DisplaySpecies(held));
-        statSub_->setText(held.nickname.empty() ? " " : held.nickname);
+        statName_->setText(held.nickname.empty() ? DisplaySpecies(held)
+                                                  : held.nickname);
         FillStatGrid(held);
-        statInfo_->setText(std::string("Nao existe em ") +
+        SetInfo(std::string("Nao existe em ") +
                            cp::GameName(p.source->GameId()));
         return;
       }
       const g3::BoxPokemon& held = session_.Held();
-      statName_->setText(DisplaySpecies(held));
-      statSub_->setText(held.nickname.empty() ? " " : held.nickname);
+      statName_->setText(held.nickname.empty() ? DisplaySpecies(held)
+                                                : held.nickname);
       FillStatGrid(held);
 
       // Aviso de golpe (spec 038): a especie cabe, mas um golpe nao existe no
@@ -5899,17 +7240,17 @@ class BoxActivity : public brls::Activity {
       // texto avisa em vez de explicar uma recusa.
       const int missing = p.MissingMove(held);
       if (missing != 0) {
-        // O nome so existe para golpes do gen3; acima disso a tabela do app
-        // nao os conhece, e o numero e o melhor que da para dizer.
-        const std::string name = g3::MoveName(static_cast<std::uint16_t>(missing));
+        // A tabela alcanca a gen9 (spec 106); o numero so aparece para id que
+        // nem o PokeAPI conhece.
+        const std::string name = DisplayMove(static_cast<std::uint16_t>(missing));
         const std::string what =
             name.empty() ? ("golpe #" + std::to_string(missing)) : name;
-        statInfo_->setText("Aviso: " + what + " nao existe em " +
+        SetInfo("Aviso: " + what + " nao existe em " +
                            cp::GameName(p.source->GameId()) + " — A solta");
         return;
       }
 
-      statInfo_->setText("Segurando — A solta, B cancela");
+      SetInfo("Segurando — A solta, B cancela");
       return;
     }
 
@@ -5918,82 +7259,58 @@ class BoxActivity : public brls::Activity {
       statName_->setText("—");
       statSub_->setText("");
       const std::string warn = p.source->Warning();
-      statInfo_->setText(warn.empty() ? "" : warn);
+      SetInfo(warn.empty() ? "" : warn);
       ClearStatGrid();
     } else {
-      statName_->setText(DisplaySpecies(mon));
-      // Apelido so quando difere da especie — "Pidgey Lv.1 Pidgey" duplicava.
-      const bool has_nick =
-          !mon.nickname.empty() && mon.nickname != DisplaySpecies(mon);
-      statSub_->setText(has_nick ? mon.nickname : "");
-      statInfo_->setText("");
+      // Como o HOME: a faixa mostra o APELIDO quando existe; a especie e o
+      // fallback. O campo separado de apelido saiu (captura nao tem).
+      statName_->setText(mon.nickname.empty() ? DisplaySpecies(mon)
+                                              : mon.nickname);
       FillStatGrid(mon);
-    }
-  }
-
-  // Tag de idioma como o HOME exibe (spec 098). A numeracao e a mesma do
-  // gen3 ao gen9: 1=JPN 2=ENG 3=FRE 4=ITA 5=GER 7=SPA 8=KOR 9=CHS 10=CHT.
-  static const char* LanguageTag(std::uint8_t lang) {
-    switch (lang) {
-      case 1: return "JPN";
-      case 2: return "ENG";
-      case 3: return "FRE";
-      case 4: return "ITA";
-      case 5: return "GER";
-      case 7: return "SPA";
-      case 8: return "KOR";
-      case 9: return "CHS";
-      case 10: return "CHT";
-      default: return "";
-    }
-  }
-
-  // Sigla do jogo de origem, no lugar da insignia grafica (spec 098). Os
-  // codigos sao o GameVersion unificado que todos os formatos usam — o gen3
-  // grava 1-5/15 na word de origins, os modernos gravam o byte direto.
-  static const char* GameSigla(std::uint8_t game) {
-    switch (game) {
-      case 1: return "S";    case 2: return "R";    case 3: return "E";
-      case 4: return "FR";   case 5: return "LG";   case 7: return "HG";
-      case 8: return "SS";   case 10: return "D";   case 11: return "P";
-      case 12: return "PT";  case 15: return "CXD"; case 20: return "W";
-      case 21: return "B";   case 22: return "W2";  case 23: return "B2";
-      case 24: return "X";   case 25: return "Y";   case 26: return "AS";
-      case 27: return "OR";  case 30: return "SN";  case 31: return "MN";
-      case 32: return "US";  case 33: return "UM";  case 42: return "GP";
-      case 43: return "GE";  case 44: return "SW";  case 45: return "SH";
-      case 47: return "LA";  case 48: return "BD";  case 49: return "SP";
-      case 50: return "SL";  case 51: return "VL";
-      default: return "—";
-    }
-  }
-
-  // Slug da logo do jogo do painel (romfs/ui/games). O NestBox usa a logo do
-  // proprio HOME; jogo sem logo mapeada devolve vazio e a logo some.
-  static const char* PanelLogoSlug(const BoxPanel& p) {
-    if (p.source_id == kNestId) return "pokemon-home";
-    switch (p.source->GameId()) {
-      case cp::Game::kFireRed: return "pokemon-firered";
-      case cp::Game::kLeafGreen: return "pokemon-leafgreen";
-      case cp::Game::kEmerald: return "pokemon-emerald";
-      case cp::Game::kRubySapphire: return "pokemon-ruby";
-      case cp::Game::kLetsGo: return "pokemon-lets-go-pikachu";
-      case cp::Game::kSwordShield: return "pokemon-sword";
-      case cp::Game::kBdsp: return "pokemon-brilliant-diamond";
-      case cp::Game::kLegendsArceus: return "pokemon-legends-arceus";
-      case cp::Game::kScarletViolet: return "pokemon-scarlet";
-      case cp::Game::kLegendsZA: return "pokemon-legends-z-a";
-      default: return "";
+      SetInfo("");
     }
   }
 
   // Preenche a identidade da faixa teal (sexo, OT, idioma, origem, logo) a
   // partir do Pokemon sob o cursor — e a parte nova da spec 098.
+  // LanguageTag/GameSigla/BallSprite viviam aqui e subiram para escopo de
+  // namespace na spec 103: a tela de summary usa os mesmos.
   void FillIdentity(const g3::BoxPokemon& mon) {
+    identityShown_ = true;
     const std::uint8_t g = g3::Gender(mon);
-    statGender_->setText(g == 0 ? "♂" : g == 1 ? "♀" : "");
-    statGender_->setTextColor(g == 0 ? nvgRGB(0x3C, 0x9E, 0xF0)
-                                     : nvgRGB(0xF0, 0x6E, 0x96));
+    statGender_->Set(g);
+
+    const char* ball = BallSprite(mon.display_ball);
+    if (ball) {
+      statBall_->setImageFromFile(std::string(POKEHOME_UI_ASSETS) + "balls/" +
+                                  ball + ".png");
+      statBall_->setVisibility(brls::Visibility::VISIBLE);
+    } else {
+      statBall_->setVisibility(brls::Visibility::INVISIBLE);
+    }
+    statusHead_->vector_ball = (ball == nullptr);
+    lvTag_->setVisibility(brls::Visibility::VISIBLE);
+
+    // Tipos da especie (1 ou 2), pela dex nacional.
+    static const char* kTypeNames[] = {
+        "",       "normal",  "fighting", "flying", "poison",  "ground",
+        "rock",   "bug",     "ghost",    "steel",  "fire",    "water",
+        "grass",  "electric","psychic",  "ice",    "dragon",  "dark",
+        "fairy"};
+    const int dex = mon.national_dex != 0
+                        ? mon.national_dex
+                        : g3::NationalDex(mon.species);
+    for (int i = 0; i < 2; ++i) {
+      const std::uint8_t t =
+          (dex >= 1 && dex <= 1025) ? pokehome::modern::kTypeIds[dex][i] : 0;
+      if (t >= 1 && t <= 18) {
+        typeIcons_[i]->setImageFromFile(std::string(POKEHOME_UI_ASSETS) +
+                                        "types/" + kTypeNames[t] + ".png");
+        typeIcons_[i]->setVisibility(brls::Visibility::VISIBLE);
+      } else {
+        typeIcons_[i]->setVisibility(brls::Visibility::INVISIBLE);
+      }
+    }
 
     statOt_->setText(mon.ot_name);
     otTag_->setVisibility(mon.ot_name.empty() ? brls::Visibility::INVISIBLE
@@ -6007,7 +7324,10 @@ class BoxActivity : public brls::Activity {
     gameChip_->setVisibility(brls::Visibility::VISIBLE);
     statMarks_->setVisibility(brls::Visibility::VISIBLE);
 
-    const char* slug = PanelLogoSlug(Active());
+    // Mesma tabela do rodape do cartao (spec 101): PanelArtSlug e a fonte
+    // unica, e `accent` marca o painel do NestBox.
+    const BoxPanel& ap = Active();
+    const char* slug = PanelArtSlug(ap.source, ap.source_id == kNestId);
     if (*slug) {
       // LogoPath() vive mais abaixo no arquivo (tela de saves); monta igual.
       statLogo_->setImageFromFile(std::string(POKEHOME_UI_ASSETS) + "games/" +
@@ -6018,9 +7338,25 @@ class BoxActivity : public brls::Activity {
     }
   }
 
+  // Mensagem de contexto na ponta direita. Ela divide o lugar com os
+  // marcadores (ambos ABSOLUTE em right=32): com texto, os marcadores somem;
+  // sem texto, voltam se houver um Pokemon exibido.
+  void SetInfo(const std::string& text) {
+    statInfo_->setText(text);
+    statMarks_->setVisibility(text.empty() && identityShown_
+                                  ? brls::Visibility::VISIBLE
+                                  : brls::Visibility::INVISIBLE);
+  }
+
   // Esconde tudo que so existe com um Pokemon sob o cursor (spec 098).
   void ClearIdentity() {
-    statGender_->setText("");
+    identityShown_ = false;
+    statGender_->Set(-1);
+    statBall_->setVisibility(brls::Visibility::INVISIBLE);
+    statusHead_->vector_ball = true;
+    lvTag_->setVisibility(brls::Visibility::INVISIBLE);
+    typeIcons_[0]->setVisibility(brls::Visibility::INVISIBLE);
+    typeIcons_[1]->setVisibility(brls::Visibility::INVISIBLE);
     statOt_->setText("");
     otTag_->setVisibility(brls::Visibility::INVISIBLE);
     langChip_->setVisibility(brls::Visibility::INVISIBLE);
@@ -6043,24 +7379,40 @@ class BoxActivity : public brls::Activity {
       if (v) v->setText("—");
     }
     for (brls::Label* m : statMoves_) {
-      if (m) m->setText("———");
+      if (m) {
+        m->setText("———");
+        m->setAlpha(1.0f);  // o esmaecimento do aviso morre com o dado
+      }
+    }
+    for (MoveWarnIcon* w : statMoveWarn_) {
+      if (w) w->setVisibility(brls::Visibility::GONE);
     }
   }
 
   void FillStatGrid(const g3::BoxPokemon& mon) {
     const g3::BattleStats bs = g3::ComputeStats(mon);
-    statLevel_->setText("Lv. " + std::to_string(bs.level));
+    // So o numero: o "Lv." e o lvTag_, menor e mais claro (captura).
+    statLevel_->setText(std::to_string(bs.level));
 
     FillIdentity(mon);
 
     if (statNature_) statNature_->setText(g3::NatureName(mon.nature()));
 
     if (statAbility_) {
-      const g3::PersonalInfo personal =
-          g3::Personal(g3::NationalDex(mon.species));
-      const std::string ability =
-          g3::AbilityName(personal.ability(mon.ability_bit));
-      statAbility_->setText(ability.empty() ? "—" : ability);
+      std::string ability;
+      if (mon.modern) {
+        // Formato moderno traz o ID da habilidade; o nome sai da tabela
+        // gerada do PokeAPI (spec 099).
+        const std::uint16_t id = mon.modern->ability;
+        if (id < pokehome::modern::kAbilityCount) {
+          ability = pokehome::modern::kAbilityNames[id];
+        }
+      } else {
+        const g3::PersonalInfo personal =
+            g3::Personal(g3::NationalDex(mon.species));
+        ability = g3::AbilityName(personal.ability(mon.ability_bit));
+      }
+      statAbility_->setText(ability.empty() ? "———" : ability);
     }
 
     // A ordem da barra e HP, Speed, Attack, Sp.Atk, Defense, Sp.Def — em
@@ -6072,11 +7424,28 @@ class BoxActivity : public brls::Activity {
       statValues_[i]->setText(v == 0 ? "—" : std::to_string(v));
     }
 
+    // Golpe ausente no jogo do SAVE ABERTO (spec 104): nome apagado e o
+    // icone amarelo piscando ao lado. Sempre contra o save, nao contra o
+    // painel do cursor — decisao do dono: um Pokemon parado no NestBox com
+    // golpe que o save nao conhece avisa ANTES de o jogador tentar move-lo.
+    const cp::Game save_game = save_ ? save_->GameId() : cp::Game::kCount;
     for (int i = 0; i < 4; ++i) {
       if (!statMoves_[i]) continue;
       // Slot de golpe vazio mostra o traco, como no HOME (spec 098).
-      const std::string name = g3::MoveName(mon.moves[i]);
-      statMoves_[i]->setText(mon.moves[i] == 0 ? "———" : name);
+      const std::string name = DisplayMove(mon.moves[i]);
+      // A tabela alcanca a gen9 (spec 106); o numero so sobra para id que nem
+      // o PokeAPI conhece — melhor que um rotulo em branco.
+      statMoves_[i]->setText(mon.moves[i] == 0 ? "———"
+                             : name.empty()
+                                 ? ("golpe #" + std::to_string(mon.moves[i]))
+                                 : name);
+      const bool falta = mon.moves[i] != 0 && save_game != cp::Game::kCount &&
+                         !cp::HasMove(save_game, mon.moves[i]);
+      statMoves_[i]->setAlpha(falta ? 0.35f : 1.0f);
+      if (statMoveWarn_[i]) {
+        statMoveWarn_[i]->setVisibility(falta ? brls::Visibility::VISIBLE
+                                              : brls::Visibility::GONE);
+      }
     }
   }
 
@@ -6084,24 +7453,35 @@ class BoxActivity : public brls::Activity {
   BoxSource* save_;
   BoxPanel left_;
   BoxPanel right_;
+  // Visao geral das caixas (spec 105): a barra de status inteira para
+  // esconder, e o cartao/tooltip que a substitui.
+  brls::Box* statsCard_ = nullptr;
+  BoxOverviewCard* ovCard_ = nullptr;
   brls::Label* statName_ = nullptr;
-  brls::Label* statGender_ = nullptr;
+  GenderIcon* statGender_ = nullptr;
   brls::Label* statLevel_ = nullptr;
   brls::Label* statNature_ = nullptr;
   brls::Label* statAbility_ = nullptr;
   brls::Label* statValues_[6] = {};
   brls::Label* statMoves_[4] = {};
+  MoveWarnIcon* statMoveWarn_[4] = {};  // icone do golpe ausente (spec 104)
   brls::Label* statSub_ = nullptr;
   brls::Label* statInfo_ = nullptr;
   // Identidade da faixa teal (spec 098).
   brls::Label* statOt_ = nullptr;
-  brls::Label* otTag_ = nullptr;
+  PersonIcon* otTag_ = nullptr;
+  brls::Label* lvTag_ = nullptr;
+  brls::Image* typeIcons_[2] = {};
   brls::Box* langChip_ = nullptr;
   brls::Label* statLang_ = nullptr;
   brls::Box* gameChip_ = nullptr;
   brls::Label* statGame_ = nullptr;
-  brls::Label* statMarks_ = nullptr;
+  MarkStrip* statMarks_ = nullptr;
   brls::Image* statLogo_ = nullptr;
+  StatusHead* statusHead_ = nullptr;
+  brls::Image* statBall_ = nullptr;
+  // Ha um Pokemon exibido na faixa agora (controla os marcadores em SetInfo).
+  bool identityShown_ = false;
   std::size_t cursor_ = 0;
   bool activeLeft_ = false;  // comeca no save, que tem conteudo
 
@@ -6527,7 +7907,8 @@ class FooterTab : public brls::Box {
 // estiver atras.
 constexpr float kFooterHeight = 35.2f;  // 44 - 20% (pedido do dono)
 
-brls::Box* MakeLegendBar(bool back, brls::Label** out_back) {
+brls::Box* MakeLegendBar(bool back, brls::Label** out_back,
+                         const std::string& right_hint) {
   auto* row = new brls::Box(brls::Axis::ROW);
   row->setHeight(kFooterHeight);
   // CENTER, nao FLEX_END: alinha "Ajuda" e "Voltar" na mesma linha. Antes o
@@ -6563,6 +7944,21 @@ brls::Box* MakeLegendBar(bool back, brls::Label** out_back) {
     // Devolvido para quem quiser trocar o texto conforme o estado da tela —
     // o modo Selecao troca "Voltar" por "Cancelar" (spec 088).
     if (out_back) *out_back = label;
+  }
+
+  // Lado direito da legenda (spec 100). O espacador grow(1) empurra a dica
+  // para a borda; sem ele ela ficaria colada no "Voltar".
+  if (!right_hint.empty()) {
+    auto* spacer = new brls::Box(brls::Axis::ROW);
+    spacer->setGrow(1.0f);
+    row->addView(spacer);
+
+    auto* hint = new brls::Label();
+    hint->setText(right_hint);
+    hint->setFontSize(21);
+    hint->setTextColor(kTextPrimary);
+    hint->setMarginRight(kScreenSideMargin);
+    row->addView(hint);
   }
 
   return row;
@@ -7707,7 +9103,7 @@ class UserSelectActivity : public brls::Activity {
     bar->addView(icon);
 
     auto* title = new brls::Label();
-    title->setText("POKEMON");
+    title->setText("POKÉMON");  // acento como no HOME (spec 105)
     title->setFontSize(24);
     title->setTextColor(kTextPrimary);
     bar->addView(title);

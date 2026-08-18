@@ -14,6 +14,8 @@
 #include "gen3_natures.h"
 #include "gen3_personal.h"
 #include "gen3_species.h"
+#include "gen9_base_stats.h"  // stats de Pokemon modernos (spec 099)
+#include "pkm_model.h"
 
 namespace pokehome::gen3 {
 namespace {
@@ -360,6 +362,9 @@ BoxPokemon ParseBoxPokemonRecord(const std::uint8_t* rec) {
   // Jogo de origem nos bits 7-10 (1=Sapphire 2=Ruby 3=Emerald 4=FR 5=LG),
   // a mesma numeracao que os formatos modernos usam para o gen3 (spec 098).
   mon.origin_game = static_cast<std::uint8_t>((origins >> 7) & 0x0F);
+  // Pokebola nos bits 11-14 (1=Master ... 12=Premier), numeracao que os
+  // formatos modernos preservam (spec 099).
+  mon.display_ball = static_cast<std::uint8_t>((origins >> 11) & 0x0F);
 
   // IV32 em 0x48 (offset 4): 6 campos de 5 bits, depois ovo e habilidade.
   const std::uint32_t iv32 = ReadU32(m + 4);
@@ -488,6 +493,29 @@ BattleStats ComputeStats(const BoxPokemon& mon) {
   // faltaria a tabela de base stats do gen8/gen9, que este projeto nao tem.
   if (mon.display_level != 0) {
     out.level = mon.display_level;
+    // Com o payload moderno presente, os stats saem da tabela do gen9
+    // (spec 099) — a formula e a mesma do gen3, mudam a base e a natureza
+    // (mint: stat_nature vale nos formatos que o tem).
+    if (mon.modern && mon.national_dex >= 1 && mon.national_dex <= 1025) {
+      const pkm::Pokemon& p = *mon.modern;
+      const std::uint8_t* base = modern::kBaseStats[mon.national_dex];
+      if (base[0] == 0) return out;
+      const int level = out.level;
+      out.values[0] = static_cast<std::uint16_t>(
+          (2 * base[0] + p.ivs[0] + p.evs[0] / 4) * level / 100 + level + 10);
+      const int nature =
+          (p.format == pkm::Format::kPB7) ? p.nature : p.stat_nature;
+      const int up = nature / 5, down = nature % 5;
+      for (int i = 1; i < 6; ++i) {
+        int value =
+            (2 * base[i] + p.ivs[i] + p.evs[i] / 4) * level / 100 + 5;
+        if (up != down) {
+          if (i - 1 == up) value = value * 110 / 100;
+          if (i - 1 == down) value = value * 90 / 100;
+        }
+        out.values[i] = static_cast<std::uint16_t>(value);
+      }
+    }
     return out;
   }
 
