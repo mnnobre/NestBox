@@ -17,6 +17,7 @@
 //
 // GUARDRAIL: tests/saves-limpos/ e SOMENTE LEITURA. Este teste so le.
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -25,6 +26,8 @@
 
 #include "gen3_save.h"
 #include "modern_box_view.h"
+#include "nestbox_file.h"
+#include "pkm_convert.h"
 #include "save_writer.h"
 
 namespace fs = std::filesystem;
@@ -281,11 +284,98 @@ static void TestVazio() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PARTE 4 — deposito moderno no NestBox (spec 106).
+//
+// O ciclo completo do banco: Pokemon real de cada jogo entra num slot v5 com a
+// etiqueta do proprio formato, o banco vai a bytes e volta (Encode/Decode), e
+// o que sai parseia identico — payload byte a byte e a mesma especie/shiny que
+// o PkHeX declarou. E o caminho que o Put/At do NestBoxSource usam.
+// ---------------------------------------------------------------------------
+static void TestDepositoNestBox() {
+  std::printf("\n=== PARTE 4: deposito moderno no NestBox (spec 106) ===\n");
+
+  namespace nb = pokehome::nest;
+  nb::NestData banco = nb::MakeEmpty(5, 30);
+  std::size_t caixa = 0;
+
+  for (const auto& j : kJogos) {
+    auto sd = savew::Load(ReadFile(std::string(CLEAN_SAVES) + j.save), j.game);
+    if (!sd) {
+      Check(false, std::string(j.nome) + ": save abriu");
+      continue;
+    }
+    // O primeiro Pokemon presente do save.
+    const pkm::Pokemon* p = nullptr;
+    for (const auto& slot : sd->box) {
+      if (slot.present && slot.mon.species != 0) { p = &slot.mon; break; }
+    }
+    if (!p) {
+      Check(false, std::string(j.nome) + ": tem Pokemon para depositar");
+      continue;
+    }
+
+    const std::uint8_t fmt = vw::ToNestFormat(p->format);
+    Check(fmt != nb::kEmpty,
+          std::string(j.nome) + ": formato pkm mapeia para SlotFormat");
+    Check(vw::FormatOfGame(j.game) == p->format,
+          std::string(j.nome) + ": FormatOfGame bate com o parser");
+
+    std::uint8_t* dst = banco.At(caixa, 0);
+    Check(nb::SlotWrite(dst, fmt, p->raw.data(), p->raw.size()),
+          std::string(j.nome) + ": payload cabe no slot v5");
+    ++caixa;
+    if (caixa >= banco.boxes) break;
+  }
+
+  // O banco inteiro vai a bytes e volta — o mesmo trajeto do cartao SD.
+  const nb::NestData volta = nb::Decode(nb::Encode(banco));
+  Check(volta.valid(), "banco decodifica de volta");
+
+  caixa = 0;
+  for (const auto& j : kJogos) {
+    auto sd = savew::Load(ReadFile(std::string(CLEAN_SAVES) + j.save), j.game);
+    if (!sd) continue;
+    const pkm::Pokemon* p = nullptr;
+    for (const auto& slot : sd->box) {
+      if (slot.present && slot.mon.species != 0) { p = &slot.mon; break; }
+    }
+    if (!p) continue;
+
+    const std::uint8_t* rec = volta.At(caixa, 0);
+    const std::string onde = std::string(j.nome) + " (nest caixa " +
+                             std::to_string(caixa) + ")";
+    Check(!nb::SlotEmpty(rec), onde + ": slot ocupado depois da volta");
+    Check(nb::SlotSize(rec) == p->raw.size(),
+          onde + ": tamanho do payload sobrevive");
+    Check(std::memcmp(nb::SlotPayload(rec), p->raw.data(), p->raw.size()) == 0,
+          onde + ": payload byte a byte identico");
+
+    const auto parsed = vw::ParseNestPayload(nb::SlotFormatOf(rec),
+                                             nb::SlotPayload(rec),
+                                             nb::SlotSize(rec));
+    if (!parsed) {
+      Check(false, onde + ": ParseNestPayload reconhece o slot");
+      ++caixa;
+      continue;
+    }
+    Check(pkm::NationalDex(*parsed) == pkm::NationalDex(*p),
+          onde + ": mesma National Dex apos a volta");
+    const g3::BoxPokemon tela = vw::ToBoxPokemon(*parsed);
+    Check(!tela.empty(), onde + ": a tela desenha o slot sacado");
+    Check(tela.modern != nullptr, onde + ": o payload congelado acompanha");
+    Check(tela.modern->format == p->format, onde + ": formato preservado");
+    ++caixa;
+    if (caixa >= volta.boxes) break;
+  }
+}
+
 int main() {
   std::printf("=== spec 082: pkm::Pokemon -> g3::BoxPokemon (a tela) ===\n");
   TestConversao();
   TestAmostraDiscriminante();
   TestVazio();
+  TestDepositoNestBox();
 
   if (g_failures > 0) {
     std::printf("\n%d FALHA(S)\n", g_failures);

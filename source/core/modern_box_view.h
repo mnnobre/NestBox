@@ -15,6 +15,8 @@
 // por ctest (regra do CLAUDE.md).
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "gen3_save.h"
@@ -51,5 +53,25 @@ struct BoxChange {
 // dado, e transferir para cima e uma spec propria. Tudo-ou-nada de proposito —
 // um commit parcial deixaria o save e o NestBox contando historias diferentes.
 bool ApplyBoxChanges(savew::SaveData& sd, const std::vector<BoxChange>& changes);
+
+// --- Slots modernos do NestBox (spec 106) ----------------------------------
+//
+// O arquivo v5 (spec 090) guarda o payload cru com uma etiqueta de formato
+// (nest::SlotFormat). Estas funcoes traduzem a etiqueta para o modelo pkm e
+// de volta — e o que a UI precisa para depositar e exibir.
+
+// nest::SlotFormat para um pkm::Format. 0 (kEmpty) se nao mapeia.
+std::uint8_t ToNestFormat(pkm::Format f);
+
+// Parseia o payload de um slot moderno do NestBox pelo formato etiquetado.
+// nullopt para formato gen3/desconhecido ou payload que o parser recusa.
+std::optional<pkm::Pokemon> ParseNestPayload(std::uint8_t nest_fmt,
+                                             const std::uint8_t* data,
+                                             std::size_t n);
+
+// O formato pkm que um save moderno armazena. E o portao do saque (TD-02 da
+// spec 106): so um Pokemon deste formato pode ser gravado nesse save sem
+// conversao.
+pkm::Format FormatOfGame(savew::Game g);
 
 }  // namespace pokehome::view

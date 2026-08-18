@@ -2,6 +2,12 @@
 
 #include <cstring>
 
+#include "nestbox_file.h"
+#include "pa8.h"
+#include "pb7.h"
+#include "pb8.h"
+#include "pk8.h"
+#include "pk9.h"
 #include "pkm_convert.h"
 #include "species_facts.h"
 
@@ -75,6 +81,44 @@ bool ApplyBoxChanges(savew::SaveData& sd,
     if (!ok) return false;  // inalcancavel apos a validacao; cinto e suspensorio
   }
   return true;
+}
+
+std::uint8_t ToNestFormat(pkm::Format f) {
+  switch (f) {
+    case pkm::Format::kPK8: return nest::kPk8;
+    case pkm::Format::kPK9: return nest::kPk9;
+    case pkm::Format::kPA8: return nest::kPa8;
+    case pkm::Format::kPB8: return nest::kPb8;
+    case pkm::Format::kPB7: return nest::kPb7;
+    case pkm::Format::kNone: break;
+  }
+  return nest::kEmpty;
+}
+
+std::optional<pkm::Pokemon> ParseNestPayload(std::uint8_t nest_fmt,
+                                             const std::uint8_t* data,
+                                             std::size_t n) {
+  if (!data || n == 0) return std::nullopt;
+  switch (nest_fmt) {
+    case nest::kPk8: return pk8::Parse(data, n);
+    case nest::kPk9: return pk9::Parse(data, n);
+    case nest::kPa8: return pa8::Parse(data, n);
+    case nest::kPb8: return pb8::Parse(data, n);
+    case nest::kPb7: return pb7::Parse(data, n);
+    default: return std::nullopt;  // kGen3/kEmpty nao passam por aqui
+  }
+}
+
+pkm::Format FormatOfGame(savew::Game g) {
+  switch (g) {
+    case savew::Game::kSwSh: return pkm::Format::kPK8;
+    case savew::Game::kSV:   return pkm::Format::kPK9;
+    case savew::Game::kPLA:  return pkm::Format::kPA8;
+    case savew::Game::kBDSP: return pkm::Format::kPB8;
+    case savew::Game::kLGPE: return pkm::Format::kPB7;
+    case savew::Game::kZA:   return pkm::Format::kPK9;  // Z-A grava pk9
+  }
+  return pkm::Format::kNone;
 }
 
 }  // namespace pokehome::view

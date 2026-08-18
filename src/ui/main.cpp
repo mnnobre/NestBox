@@ -52,6 +52,7 @@
 #include "za_save.h"
 #include "legality.h"
 #include "modern_box_view.h"
+#include "pkm_convert.h"  // pkm::NationalDex para slots modernos (spec 106)
 #include "nlog.h"
 #include "save_writer.h"
 #include "updater.h"
@@ -631,14 +632,31 @@ bool SaveNestBox(const nest::NestData& d) {
              bytes.size(), written, path);
     return false;
   }
-  NLOG_ACT("NestBox gravado: %zu bytes em \"%s\" (geracao %llu)", bytes.size(),
-           path, static_cast<unsigned long long>(target.generation));
-
 #ifdef __SWITCH__
   // O commit e o que faz a escrita chegar ao cartao.
   FsFileSystem* sdmc = fsdevGetDeviceFileSystem("sdmc");
   if (sdmc) fsFsCommit(sdmc);
 #endif
+
+  // Rele do cartao e confere, como o backup de save ja faz (TD-01 da spec
+  // 032; estendido ao banco na spec 106). Um banco gravado que a PROXIMA
+  // leitura rejeitaria e exatamente o modo de falha que perde Pokemon em
+  // silencio — melhor descobrir agora, com o commit ainda abortavel.
+  const nest::ab::Slot check = nest::ab::Unwrap(ReadWholeFile(path));
+  if (!check.valid || check.generation != target.generation ||
+      check.payload != payload) {
+    NLOG_ACT("FALHA gravar NestBox: releitura de \"%s\" NAO confere "
+             "(valido=%d geracao=%llu esperada=%llu, %zu bytes)",
+             path, check.valid ? 1 : 0,
+             static_cast<unsigned long long>(check.generation),
+             static_cast<unsigned long long>(target.generation),
+             check.payload.size());
+    return false;
+  }
+
+  NLOG_ACT("NestBox gravado e CONFERIDO: %zu bytes em \"%s\" (geracao %llu)",
+           bytes.size(), path,
+           static_cast<unsigned long long>(target.generation));
   return true;
 }
 
@@ -1172,6 +1190,9 @@ class ModernSaveSource : public BoxSource {
 
   const std::string& title() const { return title_; }
 
+  // O formato pkm que ESTE save armazena (portao do saque, TD-02 da spec 106).
+  pkm::Format PkmFormat() const { return vw::FormatOfGame(save_.game); }
+
   // Para o backup obrigatorio do commit: os bytes ORIGINAIS do arquivo e um
   // nome de arquivo valido para o .bak.
   const std::vector<std::uint8_t>& bytes() const { return save_.file; }
@@ -1286,25 +1307,42 @@ class NestBoxSource : public BoxSource {
       for (std::size_t s = 0; s < data_.slots; ++s) {
         const std::uint8_t* rec = data_.At(b, s);
         if (!rec || nest::SlotEmpty(rec)) continue;
-        // So os slots gen3 sao parseaveis por aqui. Formato moderno guardado no
-        // banco tem a dex semeada por quem o depositou; varrer aqui exigiria o
-        // parser certo por formato, que e escopo da spec de UI multi-geracao.
-        if (nest::SlotFormatOf(rec) != nest::kGen3) continue;
-        const g3::BoxPokemon mon =
-            g3::ParseBoxPokemonRecord(nest::SlotPayload(rec));
-        data_.MarkSeen(g3::NationalDex(mon.species));
+        if (nest::SlotFormatOf(rec) == nest::kGen3) {
+          const g3::BoxPokemon mon =
+              g3::ParseBoxPokemonRecord(nest::SlotPayload(rec));
+          data_.MarkSeen(g3::NationalDex(mon.species));
+          continue;
+        }
+        // Slot moderno (spec 106): o parser certo por formato.
+        const auto p = vw::ParseNestPayload(
+            nest::SlotFormatOf(rec), nest::SlotPayload(rec), nest::SlotSize(rec));
+        if (p) data_.MarkSeen(pkm::NationalDex(*p));
       }
     }
   }
 
   const nest::NestData& data() const { return data_; }
 
-  // Grava os 80 bytes crus de um Pokemon num slot. `mon.raw` vem do parser.
+  // Grava os bytes crus de um Pokemon num slot, no formato em que ele estava
+  // no save de origem (D2 da spec 090): gen3 sao os 80 bytes de `mon.raw`;
+  // moderno (spec 106) e o payload congelado em `mon.modern`.
   void Put(std::size_t box, std::size_t slot, const g3::BoxPokemon& mon) {
     std::uint8_t* dst = data_.At(box, slot);
     if (!dst) return;
-    // Formato nativo: entra como gen3 porque veio de um save gen3. A conversao
-    // acontece so na saida, ao depositar (D2 da spec 090).
+    if (mon.modern) {
+      const std::uint8_t fmt = vw::ToNestFormat(mon.modern->format);
+      if (fmt == nest::kEmpty ||
+          !nest::SlotWrite(dst, fmt, mon.modern->raw.data(),
+                           mon.modern->raw.size())) {
+        // Formato desconhecido ou payload maior que o slot: melhor nao gravar
+        // que gravar mutilado. O slot fica como estava.
+        NLOG_ACT("NestBox::Put RECUSOU moderno (fmt=%d, %zu bytes)",
+                 static_cast<int>(mon.modern->format), mon.modern->raw.size());
+        return;
+      }
+      data_.MarkSeen(pkm::NationalDex(*mon.modern));
+      return;
+    }
     nest::SlotWrite(dst, nest::kGen3, mon.raw, sizeof(mon.raw));
     // Depositar e o que registra na dex global — o mesmo gatilho do HOME
     // (§10 da pesquisa). Sacar depois NAO desregistra (spec 029).
@@ -1349,13 +1387,16 @@ class NestBoxSource : public BoxSource {
   g3::BoxPokemon At(std::size_t box, std::size_t slot) const override {
     const std::uint8_t* rec = data_.At(box, slot);
     if (!rec || nest::SlotEmpty(rec)) return {};
-    // A tela ainda so sabe desenhar gen3 (o BoxSource devolve g3::BoxPokemon).
-    // Slot de formato moderno existe no banco e sobrevive ao round-trip, mas
-    // aparece vazio aqui ate a spec de UI multi-geracao.
-    if (nest::SlotFormatOf(rec) != nest::kGen3) return {};
     // Parseia a cada chamada, como o SaveSource ja faz. Se pesar no console,
     // vira cache — ver TD-02 da spec 028.
-    return g3::ParseBoxPokemonRecord(nest::SlotPayload(rec));
+    if (nest::SlotFormatOf(rec) == nest::kGen3) {
+      return g3::ParseBoxPokemonRecord(nest::SlotPayload(rec));
+    }
+    // Slot moderno (spec 106): o mesmo caminho de exibicao dos saves de
+    // Switch. Payload que o parser recusa aparece vazio — nunca inventado.
+    const auto p = vw::ParseNestPayload(
+        nest::SlotFormatOf(rec), nest::SlotPayload(rec), nest::SlotSize(rec));
+    return p ? vw::ToBoxPokemon(*p) : g3::BoxPokemon{};
   }
 
   // O NestBox comeca vazio e recebe o que vier — e o destino natural da
@@ -1367,6 +1408,36 @@ class NestBoxSource : public BoxSource {
   std::size_t current_box_ = 0;
   nest::NestData data_;
 };
+
+// Portao de formato entre fontes (specs 086/106). Por que ESTE Pokemon nao
+// pode entrar NESTE destino? Vazio = pode.
+//
+// O NestBox guarda qualquer formato desde a spec 106 (o arquivo v5 ja sabia,
+// spec 090). O que continua bloqueado e o que exigiria CONVERSAO: gen3 para
+// save de Switch ("para cima"), moderno para save de GBA ("para baixo") e
+// formatos pkm diferentes entre saves modernos — `SaveData::Set` grava o
+// payload como veio, e um pa8 num slot pk9 corromperia o save.
+std::string FormatBlockReason(const g3::BoxPokemon& mon, BoxSource* dst) {
+  if (mon.empty() || !dst) return "";
+  const bool is_modern = mon.modern != nullptr;
+  if (dynamic_cast<NestBoxSource*>(dst)) return "";
+  if (auto* m = dynamic_cast<ModernSaveSource*>(dst)) {
+    if (!is_modern) {
+      return "Transferir Pokemon de GBA para um save de Switch ainda nao e "
+             "suportado.";
+    }
+    if (mon.modern->format != m->PkmFormat()) {
+      return "Transferir entre jogos de Switch com formatos diferentes ainda "
+             "nao e suportado.";
+    }
+    return "";
+  }
+  // Destino gen3 (ou fonte somente leitura): moderno nao desce sem conversao.
+  if (is_modern) {
+    return "Transferir Pokemon de Switch para um save de GBA nao e suportado.";
+  }
+  return "";
+}
 
 // UNICO ponto do app que decide qual fonte um arquivo de save vira (spec 082).
 //
@@ -6441,25 +6512,16 @@ class BoxActivity : public brls::Activity {
               return true;
             }
 
-            // kSegurando: solta o bloco com o canto no cursor.
-            const bool to_nest =
-                dynamic_cast<NestBoxSource*>(p.source) != nullptr;
-            const bool to_modern =
-                dynamic_cast<ModernSaveSource*>(p.source) != nullptr;
+            // kSegurando: solta o bloco com o canto no cursor. O portao de
+            // formato (specs 086/106) confere cada Pokemon do bloco contra o
+            // destino — dentro da mesma fonte ele devolve vazio e nada muda.
             for (const auto& [from, _] : selShape_) {
               const g3::BoxPokemon m = EffectiveOf(from);
-              const bool is_modern = m.modern != nullptr;
-              if ((is_modern && to_nest) || (!is_modern && to_modern)) {
-                NLOG_ACT("BLOQUEADO soltar bloco: %s cruza formato "
-                         "(moderno=%d, destino %s)",
-                         DisplaySpecies(m).c_str(), is_modern ? 1 : 0,
-                         to_nest ? "nestbox" : "save moderno");
-                NoticeDialog(to_nest
-                                 ? "Guardar Pokemon de Switch no NestBox "
-                                   "ainda nao e suportado."
-                                 : "Transferir Pokemon de GBA para um save "
-                                   "de Switch ainda nao e suportado.",
-                             "Entendi");
+              const std::string why = FormatBlockReason(m, p.source);
+              if (!why.empty()) {
+                NLOG_ACT("BLOQUEADO soltar bloco: %s cruza formato: %s",
+                         DisplaySpecies(m).c_str(), why.c_str());
+                NoticeDialog(why, "Entendi");
                 return true;
               }
             }
@@ -6538,33 +6600,32 @@ class BoxActivity : public brls::Activity {
                 return true;
               }
             }
-            // Portoes de formato (spec 086): os dois cruzamentos que gravariam
-            // dado mutilado. O NestBox armazena slots gen3 de 80 bytes — um
-            // Pokemon moderno depositado ali perderia tudo que o raw nao
-            // carrega. E um Pokemon gen3/NestBox num save moderno exigiria a
-            // transferencia para cima (conversao de formato), que e spec
-            // propria. Recusar AQUI, na hora do gesto, e o que evita o
-            // trabalho perdido de descobrir so no commit.
-            const bool held_modern = session_.Held().modern != nullptr;
-            if (held_modern && dynamic_cast<NestBoxSource*>(p.source)) {
-              NLOG_ACT("BLOQUEADO soltar %s no NestBox: Pokemon moderno, "
-                       "deposito exige formato de slot proprio (spec futura)",
-                       DisplaySpecies(session_.Held()).c_str());
-              NoticeDialog(
-                  "Guardar Pokemon de Switch no NestBox ainda nao e "
-                  "suportado.\nEle pode ser movido dentro do proprio save.",
-                  "Entendi");
-              return true;
+            // Portao de formato (specs 086/106): o que gravaria dado mutilado
+            // ou exigiria conversao e recusado AQUI, na hora do gesto — e o
+            // que evita descobrir so no commit. Desde a spec 106 o deposito
+            // moderno no NestBox passa; os cruzamentos com gen3 e entre
+            // formatos modernos diferentes continuam bloqueados.
+            {
+              const std::string why =
+                  FormatBlockReason(session_.Held(), p.source);
+              if (!why.empty()) {
+                NLOG_ACT("BLOQUEADO soltar %s: %s",
+                         DisplaySpecies(session_.Held()).c_str(), why.c_str());
+                NoticeDialog(why, "Entendi");
+                return true;
+              }
             }
-            if (!held_modern && dynamic_cast<ModernSaveSource*>(p.source)) {
-              NLOG_ACT("BLOQUEADO soltar %s no save moderno: origem gen3/"
-                       "NestBox, transferencia para cima e spec propria",
-                       DisplaySpecies(session_.Held()).c_str());
-              NoticeDialog(
-                  "Transferir Pokemon de GBA para um save de Switch ainda "
-                  "nao e suportado.",
-                  "Entendi");
-              return true;
+            // Numa TROCA cruzando fontes, o ocupante viaja no sentido oposto —
+            // o mesmo portao vale para ele contra a fonte de ORIGEM.
+            if (p.source_id != from.source && !current.empty()) {
+              BoxSource* origem = from.source == kNestId ? nest_ : save_;
+              const std::string why = FormatBlockReason(current, origem);
+              if (!why.empty()) {
+                NLOG_ACT("BLOQUEADO trocar: ocupante %s nao viaja: %s",
+                         DisplaySpecies(current).c_str(), why.c_str());
+                NoticeDialog(why, "Entendi");
+                return true;
+              }
             }
             // Modo Mover recusa soltar sobre ocupado; e o que o diferencia do
             // modo Trocar (TD-02 da spec 031).
@@ -6993,47 +7054,37 @@ class BoxActivity : public brls::Activity {
       modern_changes.push_back({ref.box, ref.slot, mon});
     }
 
-    // BACKUP OBRIGATORIO antes de tocar no save (spec 032). Falhou, nao
-    // escreve — nao existe caminho que grave sem rede. Vale para as DUAS
-    // fontes gravaveis: gen3 (spec 033) e moderna (spec 086).
     auto* save = dynamic_cast<SaveSource*>(save_);
     auto* modern = dynamic_cast<ModernSaveSource*>(save_);
-    if (!save_changes.empty()) {
-      if (save) {
-        NLOG_ACT("  %zu alteracoes no save \"%s\" — backup obrigatorio primeiro",
-                 save_changes.size(), save->path().c_str());
-        if (!BackupSave(save->path(), save->bytes())) {
-          NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
+    if (!save_changes.empty() && !save && !modern) {
+      NLOG_ACT("FALHA salvar: %zu alteracoes no painel do save, mas a fonte "
+               "nao e gravavel",
+               save_changes.size());
+      return false;
+    }
+    // Backstop do portao de formato: um Pokemon moderno jamais pode chegar ao
+    // WriteChanges gen3 — ele gravaria `raw` zerado por cima do slot. O drop
+    // ja recusa (spec 106); se algum caminho novo furar, o commit para AQUI,
+    // com tudo intacto.
+    if (save) {
+      for (const auto& [idx, mon] : save_changes) {
+        if (!mon.empty() && mon.modern) {
+          NLOG_ACT("FALHA salvar: Pokemon moderno enderecado a save gen3"
+                   "(indice %zu) — nada foi gravado",
+                   idx);
           return false;
         }
-        if (!save->WriteChanges(save_changes)) {
-          NLOG_ACT("FALHA salvar: WriteChanges recusou em \"%s\" (%zu slots)",
-                   save->path().c_str(), save_changes.size());
-          return false;
-        }
-        NLOG_ACT("  save gravado: \"%s\"", save->path().c_str());
-      } else if (modern) {
-        NLOG_ACT("  %zu alteracoes no save moderno \"%s\" — backup primeiro",
-                 modern_changes.size(), modern->backup_label().c_str());
-        if (!BackupSave(modern->backup_label(), modern->bytes())) {
-          NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
-          return false;
-        }
-        if (!modern->WriteChanges(modern_changes)) {
-          NLOG_ACT("FALHA salvar: WriteChanges moderno recusou (%zu slots)",
-                   modern_changes.size());
-          return false;
-        }
-        NLOG_ACT("  save moderno gravado: \"%s\"",
-                 modern->backup_label().c_str());
-      } else {
-        NLOG_ACT("FALHA salvar: %zu alteracoes no painel do save, mas a fonte "
-                 "nao e gravavel",
-                 save_changes.size());
-        return false;
       }
     }
 
+    // ORDEM (spec 106): o NestBox e gravado PRIMEIRO, o save DEPOIS. E o que
+    // elimina a janela que perdeu Pokemon no Switch: na ordem antiga, o save
+    // ja tinha sido escrito (Pokemon removido) quando uma falha do banco
+    // jogava as mudancas fora. Na ordem nova, qualquer falha aborta com o
+    // SAVE INTACTO — e se o save falhar depois do banco, o banco e regravado
+    // com o conteudo anterior (rollback). O pior caso vira "sobrou uma copia",
+    // nunca "sumiu".
+    const nest::NestData nest_before = nest->data();
     for (const auto& [ref, mon] : session_.changes()) {
       if (ref.source != kNestId) continue;
       if (mon.empty()) {
@@ -7043,8 +7094,57 @@ class BoxActivity : public brls::Activity {
       }
     }
     if (!SaveNestBox(nest->data())) {
-      NLOG_ACT("FALHA salvar: SaveNestBox recusou");
+      NLOG_ACT("FALHA salvar: SaveNestBox recusou. O save NAO foi tocado.");
+      nest->Load(nest_before);
       return false;
+    }
+
+    // BACKUP OBRIGATORIO antes de tocar no save (spec 032). Falhou, nao
+    // escreve — nao existe caminho que grave sem rede. Vale para as DUAS
+    // fontes gravaveis: gen3 (spec 033) e moderna (spec 086).
+    if (!save_changes.empty()) {
+      // Qualquer falha daqui em diante desfaz o banco para o estado anterior.
+      // Se ate o rollback falhar, o banco fica com as mudancas a mais e o
+      // save intacto — duplicata recuperavel, nunca perda (TD-01 da spec 106).
+      const auto rollback = [&] {
+        nest->Load(nest_before);
+        if (!SaveNestBox(nest_before)) {
+          NLOG_ACT("  ROLLBACK do NestBox tambem falhou: o banco em disco "
+                   "ficou com as mudancas; o save esta intacto");
+        }
+      };
+      if (save) {
+        NLOG_ACT("  %zu alteracoes no save \"%s\" — backup obrigatorio primeiro",
+                 save_changes.size(), save->path().c_str());
+        if (!BackupSave(save->path(), save->bytes())) {
+          NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
+          rollback();
+          return false;
+        }
+        if (!save->WriteChanges(save_changes)) {
+          NLOG_ACT("FALHA salvar: WriteChanges recusou em \"%s\" (%zu slots)",
+                   save->path().c_str(), save_changes.size());
+          rollback();
+          return false;
+        }
+        NLOG_ACT("  save gravado: \"%s\"", save->path().c_str());
+      } else if (modern) {
+        NLOG_ACT("  %zu alteracoes no save moderno \"%s\" — backup primeiro",
+                 modern_changes.size(), modern->backup_label().c_str());
+        if (!BackupSave(modern->backup_label(), modern->bytes())) {
+          NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
+          rollback();
+          return false;
+        }
+        if (!modern->WriteChanges(modern_changes)) {
+          NLOG_ACT("FALHA salvar: WriteChanges moderno recusou (%zu slots)",
+                   modern_changes.size());
+          rollback();
+          return false;
+        }
+        NLOG_ACT("  save moderno gravado: \"%s\"",
+                 modern->backup_label().c_str());
+      }
     }
     NLOG_ACT("SALVO com sucesso");
 
