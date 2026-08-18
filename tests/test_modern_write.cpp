@@ -14,6 +14,7 @@
 // GUARDRAIL: o save do simulador e do dono e e SOMENTE LEITURA — todo o
 // trabalho acontece em memoria; nenhum arquivo e gravado aqui.
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -21,7 +22,9 @@
 
 #include "box_move.h"
 #include "modern_box_view.h"
+#include "pkm_crypto.h"
 #include "save_writer.h"
+#include "swish_crypto.h"
 
 namespace fs = std::filesystem;
 namespace bx = pokehome::box;
@@ -155,6 +158,63 @@ int main() {
         "ApplyBoxChanges recusa mon sem payload moderno");
   Check(savew::Save(guard) == file,
         "a recusa nao deixou rastro: Save() continua byte-identico");
+
+  // --- 5. slot vazio e blank CIFRADO, nunca zeros crus (spec 107) ------
+  //
+  // Zeros crus na regiao cifrada decifram como lixo de checksum invalido e o
+  // jogo mostra BAD EGG — o bug real que o dono viu no Z-A. O vazio correto e
+  // o blank cifrado: zeros em claro (EC 0, checksum 0) passados pelo Encrypt.
+  // Oraculo: os vazios que o PROPRIO jogo gravou neste save tem essa forma.
+  std::printf("slot vazio no repouso (spec 107):\n");
+  constexpr std::uint32_t kZaBoxKey = 0x0D66012C;
+  constexpr std::size_t kZaStride = 408, kZaRecord = 344, kZaSlots = 960;
+  const auto record_at = [&](const std::vector<std::uint8_t>& f,
+                             std::size_t idx) -> std::vector<std::uint8_t> {
+    auto blocks = swc::Decrypt(f);
+    if (!blocks) return {};
+    for (const auto& b : *blocks) {
+      if (b.key == kZaBoxKey && b.data.size() == kZaSlots * kZaStride) {
+        const std::uint8_t* rec = b.data.data() + idx * kZaStride;
+        return std::vector<std::uint8_t>(rec, rec + kZaRecord);
+      }
+    }
+    return {};
+  };
+
+  std::vector<std::uint8_t> blank(kZaRecord, 0);
+  pkc::Encrypt(blank.data(), blank.size(), pkc::kBlockPK8);
+
+  const std::size_t from_idx = from_box * sd->slots_per_box + from_slot;
+  const std::vector<std::uint8_t> emptied = record_at(out, from_idx);
+  Check(emptied == blank,
+        "slot esvaziado e o blank cifrado do jogo, nao zeros crus");
+
+  // O reparo: zeros plantados (o dano da 0.9.1) somem no proximo Save.
+  std::vector<std::uint8_t> damaged;
+  {
+    auto blocks = swc::Decrypt(out);
+    Check(blocks.has_value(), "arquivo regravado decifra para o reparo");
+    if (blocks) {
+      for (auto& b : *blocks) {
+        if (b.key == kZaBoxKey && b.data.size() == kZaSlots * kZaStride) {
+          std::memset(b.data.data() + from_idx * kZaStride, 0, kZaRecord);
+        }
+      }
+      damaged = swc::Encrypt(*blocks);
+    }
+  }
+  auto hurt = savew::Load(damaged);
+  Check(hurt.has_value(), "save com zeros crus ainda abre");
+  if (hurt) {
+    Check(!hurt->At(from_box, from_slot).present,
+          "o registro zerado le como vazio (e nao como Pokemon)");
+    // Qualquer commit repara: um Set noutro slot marca sujeira e o Save passa
+    // o reparo por todos os registros.
+    hurt->Set(to_box, to_slot, hurt->At(to_box, to_slot).mon);
+    const std::vector<std::uint8_t> healed = savew::Save(*hurt);
+    Check(record_at(healed, from_idx) == blank,
+          "zeros crus plantados viram blank cifrado no proximo Save");
+  }
 
   if (g_failures) {
     std::printf("%d falha(s)\n", g_failures);

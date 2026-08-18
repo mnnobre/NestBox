@@ -131,6 +131,33 @@ void PutRecord(std::uint8_t* dst, std::size_t record, Game g,
   std::memcpy(dst, rec.data(), rec.size());
 }
 
+// Slot vazio NAO e zero cru no repouso: os cinco jogos guardam um blank
+// CIFRADO — registro todo-zero em claro (EC 0, checksum 0) passado pelo
+// Encrypt. Zeros crus decifram como lixo de checksum invalido e o jogo mostra
+// BAD EGG — bug real visto pelo dono no Z-A (spec 107). Conferido contra os
+// saves limpos: 0 vazios em zeros crus nos 5 jogos; todos blanks cifrados.
+void PutBlank(std::uint8_t* dst, std::size_t record, Game g) {
+  std::vector<std::uint8_t> rec(record, 0);
+  pkc::Encrypt(rec.data(), rec.size(), CryptoBlockOf(g));
+  std::memcpy(dst, rec.data(), rec.size());
+}
+
+// Repara o dano da 0.9.1 (spec 107): registro todo-zero — que so o nosso
+// memset antigo produzia — vira blank cifrado. Excecao deliberada a escrita
+// conservadora (TD-01): nenhum jogo grava vazio como zeros, entao isto nunca
+// toca registro de save saudavel.
+void RepairZeroRecords(std::uint8_t* base, std::size_t stride,
+                       std::size_t record, std::size_t n, Game g) {
+  for (std::size_t i = 0; i < n; ++i) {
+    std::uint8_t* rec = base + i * stride;
+    bool all0 = true;
+    for (std::size_t k = 0; k < record; ++k) {
+      if (rec[k]) { all0 = false; break; }
+    }
+    if (all0) PutBlank(rec, record, g);
+  }
+}
+
 void PutU16(std::uint8_t* p, std::uint16_t v) {
   p[0] = std::uint8_t(v);
   p[1] = std::uint8_t(v >> 8);
@@ -388,6 +415,14 @@ std::vector<std::uint8_t> Save(const SaveData& sd) {
   // valer por construcao, e nao por acaso de reserializacao.
   std::vector<std::uint8_t> out = sd.file;
 
+  // O reparo da spec 107 so acompanha um commit REAL (algum slot sujo): um
+  // Save() sem mudancas continua devolvendo o arquivo byte-identico — a
+  // invariante de roundtrip que os testes G03 blindam.
+  bool touched = false;
+  for (std::size_t i = 0; i < sd.dirty().size(); ++i) {
+    if (sd.dirty()[i]) { touched = true; break; }
+  }
+
   if (IsScGame(sd.game)) {
     const ScLayout L = LayoutOf(sd.game);
     auto blocks = swc::Decrypt(out);
@@ -401,9 +436,14 @@ std::vector<std::uint8_t> Save(const SaveData& sd) {
         if (sd.box[i].present) {
           PutRecord(dst, L.record, sd.game, sd.box[i].mon);
         } else {
-          // Zera so o REGISTRO: o gap do stride nao e nosso para limpar.
-          std::memset(dst, 0, L.record);
+          // Blank cifrado, so no REGISTRO: o gap do stride nao e nosso.
+          PutBlank(dst, L.record, sd.game);
         }
+      }
+      // Reparo da 0.9.1 (spec 107): registros todo-zero viram blank cifrado.
+      if (touched) {
+        RepairZeroRecords(b.data.data(), L.stride, L.record, sd.box.size(),
+                          sd.game);
       }
       break;
     }
@@ -433,7 +473,12 @@ std::vector<std::uint8_t> Save(const SaveData& sd) {
       if (sd.box[i].present)
         PutRecord(dst, kBdspStride, sd.game, sd.box[i].mon);
       else
-        std::memset(dst, 0, kBdspStride);
+        PutBlank(dst, kBdspStride, sd.game);
+    }
+    // Reparo da 0.9.1 (spec 107): registros todo-zero viram blank cifrado.
+    if (touched) {
+      RepairZeroRecords(out.data() + kBdspBoxOffset, kBdspStride, kBdspStride,
+                        sd.box.size(), sd.game);
     }
     // Patches da bag (spec 074). Entram ANTES do MD5 logo abaixo — que e
     // exatamente por que a bag do BDSP nao precisou de digest novo: o hash de
@@ -459,7 +504,12 @@ std::vector<std::uint8_t> Save(const SaveData& sd) {
     if (sd.box[i].present)
       PutRecord(dst, kLgpeStride, sd.game, sd.box[i].mon);
     else
-      std::memset(dst, 0, kLgpeStride);
+      PutBlank(dst, kLgpeStride, sd.game);
+  }
+  // Reparo da 0.9.1 (spec 107): registros todo-zero viram blank cifrado.
+  if (touched) {
+    RepairZeroRecords(out.data() + kLgpeBoxOffset, kLgpeStride, kLgpeStride,
+                      sd.box.size(), sd.game);
   }
   // Patches da bag (spec 072). No LGPE ela esta em claro no arquivo e tem
   // CHECKSUM PROPRIO, recalculado logo abaixo — sem isso o save fica
