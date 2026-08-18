@@ -337,6 +337,17 @@ std::uint16_t InternalFromDex(int national_dex);
 // 112). `species` e o indice INTERNO gen3.
 std::uint32_t MaxExp(std::uint16_t species);
 
+// Qual dos quatro jogos gen3 e este save (spec 118)? O "game code" do bloco
+// de treinador (secao 0, offset 0xAC) responde: 0 = Ruby/Sapphire, 1 =
+// FireRed/LeafGreen, qualquer outro valor = Emerald (la o campo guarda a
+// security key). MEDIDO: o FireRed real do dono devolve 1.
+//
+// A distincao dentro do par (FR vs LG, Ruby vs Sapphire) NAO existe no save
+// — e a familia basta para learnset e codigo de origem (TD-01).
+enum class Gen3Game : std::uint8_t { kRubySapphire, kFireRedLeafGreen, kEmerald };
+
+Gen3Game DetectGame(const std::vector<std::uint8_t>& file, const SaveFile& save);
+
 // Nome da natureza (0-24). "???" se fora da faixa.
 std::string NatureName(std::uint8_t nature);
 

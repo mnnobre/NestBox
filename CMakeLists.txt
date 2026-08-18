@@ -4,7 +4,7 @@ project(pokehome C CXX)
 
 # Versao do app. Deve casar com a tag da release no GitHub — e o que o
 # auto-update compara. Ao publicar uma release nova, subir aqui tambem.
-set(NESTBOX_VERSION "0.9.9")
+set(NESTBOX_VERSION "0.9.10")
 # Repo publico so de releases — o codigo vive no repo privado mnnobre/NestBox.
 set(NESTBOX_REPO "mnnobre/NestBox")
 

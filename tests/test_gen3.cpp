@@ -804,6 +804,40 @@ void TestFullRecordSweep(const std::vector<std::uint8_t>& file,
         "todos os registros reais voltam byte-identicos");
 }
 
+// --- Deteccao do jogo (spec 118) -------------------------------------------
+//
+// O game code (secao 0, 0xAC) diz qual dos quatro jogos e. Ate a spec 118 o
+// app assumia FireRed para todo save de GBA, o que daria learnset e codigo
+// de origem errados a um save de Emerald.
+void TestDetectGame(const std::vector<std::uint8_t>& file, const char* label) {
+  std::printf("deteccao do jogo (%s):\n", label);
+  const auto save = g3::ParseSave(file);
+  if (!save) { Check(false, "save abriu"); return; }
+
+  Check(g3::DetectGame(file, *save) == g3::Gen3Game::kFireRedLeafGreen,
+        "save real do dono e detectado como FR/LG (game code 1)");
+
+  // Vermelho plantado: reescreve o game code e exige que a deteccao mude.
+  const auto& slot = g3::ActiveSlot(*save);
+  std::size_t off = 0;
+  for (const auto& s : slot.sections) {
+    if (s.id == 0) { off = s.file_offset + 0xAC; break; }
+  }
+  if (off == 0) { Check(false, "secao de treinador achada"); return; }
+
+  auto rs = file;
+  rs[off] = 0; rs[off + 1] = 0; rs[off + 2] = 0; rs[off + 3] = 0;
+  const auto rs_save = g3::ParseSave(rs);
+  Check(rs_save && g3::DetectGame(rs, *rs_save) == g3::Gen3Game::kRubySapphire,
+        "game code 0 vira Ruby/Sapphire");
+
+  auto em = file;
+  em[off] = 0xAB; em[off + 1] = 0xCD; em[off + 2] = 0xEF; em[off + 3] = 0x12;
+  const auto em_save = g3::ParseSave(em);
+  Check(em_save && g3::DetectGame(em, *em_save) == g3::Gen3Game::kEmerald,
+        "security key (nem 0 nem 1) vira Emerald");
+}
+
 int main(int argc, char** argv) {
   TestChecksum();
   TestRejectsGarbage();
@@ -827,7 +861,10 @@ int main(int argc, char** argv) {
   // Save real do simulador, quando a arvore do dono estiver por perto.
   const auto fr = ReadFile(
       "../build/switch-sim/saves/0100554023408000/Amaral/FireRed_e.sav");
-  if (!fr.empty()) TestFullRecordSweep(fr, "FireRed do simulador");
+  if (!fr.empty()) {
+    TestFullRecordSweep(fr, "FireRed do simulador");
+    TestDetectGame(fr, "FireRed do simulador");
+  }
 
   const std::string path =
       (argc >= 2) ? argv[1] : "pokemon-firered-leafgreen-version.34462.sps";

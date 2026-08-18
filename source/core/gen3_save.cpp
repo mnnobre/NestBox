@@ -744,6 +744,22 @@ int NationalDex(std::uint16_t species) {
   return kNationalDex[species];
 }
 
+Gen3Game DetectGame(const std::vector<std::uint8_t>& file,
+                    const SaveFile& save) {
+  const Slot& slot = ActiveSlot(save);
+  for (const Section& sec : slot.sections) {
+    if (sec.id != 0) continue;  // trainer info
+    if (sec.file_offset + 0xB0 > file.size()) break;
+    const std::uint32_t code = ReadU32(file.data() + sec.file_offset + 0xAC);
+    if (code == 0) return Gen3Game::kRubySapphire;
+    if (code == 1) return Gen3Game::kFireRedLeafGreen;
+    return Gen3Game::kEmerald;  // security key
+  }
+  // Sem secao de treinador legivel: FRLG e o palpite menos danoso (e o que o
+  // app assumia antes desta spec) — nunca inventa outro jogo.
+  return Gen3Game::kFireRedLeafGreen;
+}
+
 std::uint32_t MaxExp(std::uint16_t species) {
   return ExpForLevel(100, Personal(NationalDex(species)).growth_rate);
 }

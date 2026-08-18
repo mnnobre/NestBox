@@ -1031,12 +1031,19 @@ class SaveSource : public BoxSource {
   // overlay. A escrita so acontece no commit (spec 033).
   bool CanAccept() const override { return true; }
 
-  // Save gen3. Os quatro jogos do gen3 (RS, E, FR, LG) tem EXATAMENTE a mesma
-  // lista de 386 especies — verificado comparando os bitmaps da matriz —,
-  // entao nao e preciso distinguir qual deles e para responder
-  // compatibilidade. Se um dia a distincao importar (itens, locais), ai sim
-  // sera preciso ler o game code do save.
-  cp::Game GameId() const override { return cp::Game::kFireRed; }
+  // Save gen3. As especies sao as mesmas nos quatro jogos, mas desde a spec
+  // 111 o jogo aberto decide o LEARNSET da descida e o codigo de ORIGEM
+  // gravado — entao a distincao passou a importar e vem do game code do
+  // save (spec 118). Ruby/Sapphire e FR/LG nao se separam dentro do par:
+  // o save nao guarda isso, e a familia basta para as duas decisoes.
+  cp::Game GameId() const override {
+    switch (g3::DetectGame(file_, save_)) {
+      case g3::Gen3Game::kRubySapphire: return cp::Game::kRubySapphire;
+      case g3::Gen3Game::kEmerald: return cp::Game::kEmerald;
+      case g3::Gen3Game::kFireRedLeafGreen: break;
+    }
+    return cp::Game::kFireRed;
+  }
 
   // --- Escrita (spec 033) --------------------------------------------------
 
