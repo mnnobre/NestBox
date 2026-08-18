@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "learnset.h"
 #include "nestbox_file.h"
 #include "pa8.h"
 #include "pb7.h"
@@ -81,6 +82,36 @@ bool ApplyBoxChanges(savew::SaveData& sd,
       continue;
     }
     pkm::Pokemon p = *c.mon.modern;
+    // Z-A (spec 124): um pk9 NAO-nativo depositado aqui tem os campos
+    // proprios do Z-A recalculados — o bitmap de plus flags pelo learnset
+    // ate o nivel. Sem isto, um registro gravado por versao antiga do app
+    // nunca seria corrigido: o deposito do mesmo formato copia o raw
+    // conservadoramente (spec 063), entao "tirar e devolver" nao reescreve
+    // nada. Nativo do Z-A (origem 52) continua intocado.
+    if (sd.game == savew::Game::kZA && p.format == pkm::Format::kPK9 &&
+        p.origin_game != 52) {
+      const std::uint16_t dex = pkm::NationalDex(p);
+      const std::uint8_t level = pokehome::species::LevelFromExp(dex, p.exp);
+      p.za_plus_moves.clear();
+      const pokehome::learnset::Entry* e = nullptr;
+      std::size_t n = 0;
+      if (pokehome::learnset::Find(pokehome::learnset::Game::kZA, dex, p.form,
+                                   &e, &n)) {
+        for (std::size_t i = 0; i < n; ++i) {
+          if (e[i].level == 0 || e[i].level > level) continue;
+          p.za_plus_moves.push_back(e[i].move);
+        }
+      }
+      for (const std::uint16_t m : p.moves) {
+        if (!m) continue;
+        bool ja = false;
+        for (const std::uint16_t x : p.za_plus_moves) {
+          if (x == m) { ja = true; break; }
+        }
+        if (!ja) p.za_plus_moves.push_back(m);
+      }
+      p.za_plus_dex = dex;
+    }
     // Handling trainer (spec 117): num save cujo treinador nao e o OT do
     // Pokemon, o handler atual tem de ser o HT — e o ultimo "Invalid" que o
     // pkhex-verify apontava. So mexe quando o campo ainda aponta para o OT;
