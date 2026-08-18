@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include "move_pp.h"
 #include "pkm_convert.h"
 #include "species_facts.h"
 
@@ -59,10 +60,13 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
   p.stat_nature = p.nature;
   p.gender = gen3::Gender(view);
   p.language = full->language;
-  p.nickname = view.nickname;
-  // No gen3 o nome default e o da especie em CAIXA ALTA.
+  // No gen3 o nome default e o da especie em CAIXA ALTA. Nos formatos
+  // modernos, um nao-apelidado carrega o nome da especie na grafia MODERNA
+  // ("Pikachu") — e o que o PkHeX exige e o que a transferencia oficial faz
+  // (spec 115, guiado pelo pkhex-verify).
   p.is_nicknamed =
       UpperAscii(view.nickname) != UpperAscii(gen3::SpeciesName(full->species));
+  p.nickname = p.is_nicknamed ? view.nickname : gen3::SpeciesNameByDex(dex);
   p.ot_name = view.ot_name;
   p.ot_gender = static_cast<std::uint8_t>((full->origins >> 15) & 1);
   p.ot_friendship = full->friendship;
@@ -77,7 +81,16 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
   p.ball = static_cast<std::uint8_t>((full->origins >> 11) & 0x0F);
   if (p.ball == 0) p.ball = 4;  // Poke Ball: origem desconhecida nao fica sem bola
   p.met_level = static_cast<std::uint8_t>(full->origins & 0x7F);
-  p.met_location = 0;  // TD-01: sem mapa gen3->moderno de locais
+  // 30001 = "Poke Transfer", o local que o PkHeX exige para origem antiga em
+  // formato moderno (spec 115; a spec 109 gravava 0 e o verify acusava).
+  p.met_location = 30001;
+  // Data de chegada: constante valida (TD-02 da spec 115) — o BDSP recusa
+  // data zerada. {ano-2000, mes, dia}.
+  p.met_date = {24, 1, 1};
+  // "Sem egg location" no PB8 e 0xFFFF; nos demais formatos e 0.
+  p.egg_location = destino == pkm::Format::kPB8 ? 0xFFFF : 0;
+  // 0 no campo de ribbon afixada significa "Kalos Champion"; nenhuma e 0xFF.
+  p.affixed_ribbon = 0xFF;
   p.exp = full->experience;
   p.held_item = 0;  // TD-D2: item nao viaja
 
@@ -124,9 +137,11 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
   } else {
     moveset::ResetMovesByLevel(p, dest_ms, level);
   }
-  // PP corrente: cheio para o golpe novo — quem grava recalcula do golpe; um
-  // valor razoavel evita PP zero na tela.
-  for (int i = 0; i < 4; ++i) p.pp[i] = p.moves[i] ? 20 : 0;
+  // PP corrente: a BASE do golpe (tabela do PKHeX, spec 115) — acima disso o
+  // verify acusa "PP above the amount allowed".
+  for (int i = 0; i < 4; ++i) {
+    p.pp[i] = p.moves[i] ? movepp::Modern(p.moves[i]) : 0;
+  }
 
   return p;
 }
@@ -149,7 +164,11 @@ bool ConvertDown(const pkm::Pokemon& p, learnset::Game dest_learnset,
   r.personality = p.pid;
   r.ot_id = static_cast<std::uint32_t>(p.tid) |
             (static_cast<std::uint32_t>(p.sid) << 16);
-  gen3::EncodeGen3String(p.nickname, r.nickname_raw, sizeof(r.nickname_raw));
+  // Nao-apelidado volta ao default gen3: nome da especie em CAIXA ALTA
+  // (spec 115 — a subida poe a grafia moderna, a descida desfaz).
+  const std::string nick =
+      p.is_nicknamed ? p.nickname : UpperAscii(gen3::SpeciesName(interno));
+  gen3::EncodeGen3String(nick, r.nickname_raw, sizeof(r.nickname_raw));
   r.language = (p.language >= 1 && p.language <= 7) ? p.language : 2;
   r.flags = 0x02;  // tem especie
   gen3::EncodeGen3String(p.ot_name, r.ot_name_raw, sizeof(r.ot_name_raw));
@@ -211,8 +230,10 @@ bool ConvertDown(const pkm::Pokemon& p, learnset::Game dest_learnset,
     if (mv[0] == 0) return false;  // especie sem learnset no alvo: sem golpe
     for (int i = 0; i < 4; ++i) r.moves[i] = mv[i];
   }
-  // PP corrente e estado de batalha (TD-03): 5 e <= base de qualquer golpe.
-  for (int i = 0; i < 4; ++i) r.pp[i] = r.moves[i] ? 5 : 0;
+  // PP corrente: a base gen3 do golpe (tabela do PKHeX, spec 115).
+  for (int i = 0; i < 4; ++i) {
+    r.pp[i] = r.moves[i] ? movepp::Gen3(r.moves[i]) : 0;
+  }
 
   gen3::EncodeFullRecord(r, out);
   return true;

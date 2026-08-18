@@ -83,8 +83,8 @@ int main() {
   Check(up->tid == 1 && up->sid == 1, "TID/SID sao as metades do ot_id");
   Check(pkm::IsShiny(*up), "shiny gen3 continua shiny");
   Check(up->nature == r.personality % 25, "nature = PID %% 25");
-  Check(up->nickname == "PIKACHU" && !up->is_nicknamed,
-        "nome default gen3 nao conta como apelido");
+  Check(up->nickname == "Pikachu" && !up->is_nicknamed,
+        "nao-apelidado ganha a grafia moderna do nome (spec 115)");
   Check(up->ot_name == "ASH", "OT sobrevive");
   Check(up->ball == 12 && up->origin_game == 4 && up->met_level == 5,
         "bola/origem/met_level da palavra de origins");
@@ -134,7 +134,7 @@ int main() {
       Check(back.has_value(), "pk9::Parse reabre o convertido");
       if (back) {
         Check(pkm::NationalDex(*back) == 25 && back->pid == up->pid &&
-                  back->nickname == "PIKACHU" && back->ivs == up->ivs,
+                  back->nickname == "Pikachu" && back->ivs == up->ivs,
               "roundtrip do convertido preserva os campos");
       }
     }
