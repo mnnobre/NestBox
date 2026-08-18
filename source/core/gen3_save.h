@@ -332,6 +332,11 @@ int NationalDex(std::uint16_t species);
 // (spec 110).
 std::uint16_t InternalFromDex(int national_dex);
 
+// Experiencia maxima da especie (nivel 100 na curva dela). Exp acima disso
+// nao existe em jogo — e o teto que o verificador de legalidade usa (spec
+// 112). `species` e o indice INTERNO gen3.
+std::uint32_t MaxExp(std::uint16_t species);
+
 // Nome da natureza (0-24). "???" se fora da faixa.
 std::string NatureName(std::uint8_t nature);
 

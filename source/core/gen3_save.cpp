@@ -744,6 +744,10 @@ int NationalDex(std::uint16_t species) {
   return kNationalDex[species];
 }
 
+std::uint32_t MaxExp(std::uint16_t species) {
+  return ExpForLevel(100, Personal(NationalDex(species)).growth_rate);
+}
+
 std::uint16_t InternalFromDex(int national_dex) {
   if (national_dex <= 0) return 0;
   // ponytail: varredura linear (386 entradas) na descida, que e rara; tabela

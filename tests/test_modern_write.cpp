@@ -21,7 +21,10 @@
 #include <vector>
 
 #include "box_move.h"
+#include "gen3_save.h"
+#include "gen3_transfer.h"
 #include "modern_box_view.h"
+#include "moveset_memory.h"
 #include "pkm_crypto.h"
 #include "save_writer.h"
 #include "swish_crypto.h"
@@ -214,6 +217,58 @@ int main() {
     const std::vector<std::uint8_t> healed = savew::Save(*hurt);
     Check(record_at(healed, from_idx) == blank,
           "zeros crus plantados viram blank cifrado no proximo Save");
+  }
+
+  // --- 6. cauda de party no deposito convertido (spec 113) --------------
+  //
+  // Um Pokemon convertido (raw vazio) entra no slot com nivel, HP e stats
+  // preenchidos — sem isso ele chega DESMAIADO (HP atual 0), o bug real do
+  // Blastoise no Z-A.
+  std::printf("cauda de party no deposito (spec 113):\n");
+  {
+    pokehome::gen3::FullRecord g3rec;
+    g3rec.personality = 0x00010002;
+    g3rec.ot_id = 0x00010001;
+    pokehome::gen3::EncodeGen3String("PIKACHU", g3rec.nickname_raw,
+                                     sizeof(g3rec.nickname_raw));
+    g3rec.language = 2;
+    g3rec.flags = 0x02;
+    pokehome::gen3::EncodeGen3String("ASH", g3rec.ot_name_raw,
+                                     sizeof(g3rec.ot_name_raw));
+    g3rec.species = 25;
+    g3rec.experience = 100000;  // nivel 46
+    g3rec.moves[0] = 85;
+    const std::uint32_t ivs46[6] = {31, 30, 29, 28, 27, 26};
+    for (int i = 0; i < 6; ++i) g3rec.iv32 |= ivs46[i] << (i * 5);
+    g3rec.origins = static_cast<std::uint16_t>(5 | (4u << 7) | (4u << 11));
+    std::uint8_t raw80[80];
+    pokehome::gen3::EncodeFullRecord(g3rec, raw80);
+
+    pokehome::moveset::Memory mem;
+    auto up = pokehome::g3x::ConvertUp(raw80, pkm::Format::kPK9,
+                                       pokehome::moveset::Game::kZA, &mem);
+    Check(up.has_value(), "gen3 sintetico converte para o Z-A");
+    if (up) {
+      savew::SaveData sd2 = *sd;
+      Check(sd2.Set(to_box, to_slot, *up), "convertido entra no slot");
+      const std::vector<std::uint8_t> out2 = savew::Save(sd2);
+      Check(!out2.empty(), "Save() com o convertido produz arquivo");
+      const std::vector<std::uint8_t> rec =
+          record_at(out2, to_box * sd->slots_per_box + to_slot);
+      Check(rec.size() == kZaRecord, "registro do slot lido de volta");
+      if (rec.size() == kZaRecord) {
+        std::vector<std::uint8_t> dec = rec;
+        pkc::Decrypt(dec.data(), dec.size(), pkc::kBlockPK8);
+        const std::uint8_t level = dec[328];
+        const std::uint16_t hp_cur =
+            static_cast<std::uint16_t>(dec[330] | (dec[331] << 8));
+        const std::uint16_t hp_max =
+            static_cast<std::uint16_t>(dec[332] | (dec[333] << 8));
+        Check(level == 46, "nivel na cauda de party");
+        Check(hp_max != 0, "HP maximo calculado");
+        Check(hp_cur == hp_max, "HP atual CHEIO — nao chega desmaiado");
+      }
+    }
   }
 
   if (g_failures) {

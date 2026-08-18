@@ -7,7 +7,11 @@
 #include "pb8.h"
 #include "pk8.h"
 #include "pk9.h"
+#include "gen9_base_stats.h"   // base stats para a cauda de party (spec 113)
+#include "pkm_convert.h"       // NationalDex
 #include "pkm_crypto.h"
+#include "pkm_write_util.h"    // W16 da cauda de party
+#include "species_facts.h"     // LevelFromExp
 #include "swish_crypto.h"
 
 namespace savew {
@@ -119,6 +123,52 @@ std::size_t CryptoBlockOf(Game g) {
   }
 }
 
+// Cauda de party do slot (spec 113). SwSh/SV/Z-A/BDSP guardam o registro da
+// caixa em formato de party: depois do nucleo vem nivel, HP atual e os seis
+// stats (16 bytes: nivel u8, zero u8, HP atual u16, HP max u16, Atk/Def/Spe/
+// SpA/SpD u16). O Write dos formatos so produz o nucleo quando o Pokemon foi
+// convertido (raw vazio) — sem este preenchimento o HP atual fica 0 e o
+// Pokemon chega DESMAIADO (bug real visto pelo dono no Z-A). E o mesmo papel
+// do ResetPartyStats do PkHeX.
+void FillPartyTail16(std::uint8_t* tail, const pkm::Pokemon& mon) {
+  const std::uint16_t dex = pkm::NationalDex(mon);
+  if (dex == 0 || dex > 1025) return;
+  const std::uint8_t level = pokehome::species::LevelFromExp(dex, mon.exp);
+  const std::uint8_t* base = pokehome::modern::kBaseStats[dex];
+
+  // Formula padrao. Ordem fisica do save: HP, Atk, Def, Spe, SpA, SpD — a
+  // mesma de ivs/evs e da tabela. A natureza dos STATS (mint conta) indexa
+  // (Atk, Def, Spe, SpA, SpD) por n/5 (sobe) e n%5 (desce).
+  const std::uint8_t nat =
+      mon.stat_nature ? mon.stat_nature : mon.nature;
+  const int up = nat / 5, down = nat % 5;
+  std::uint16_t stats[6];
+  for (int i = 0; i < 6; ++i) {
+    const int core = (2 * base[i] + mon.ivs[i] + mon.evs[i] / 4) * level / 100;
+    if (i == 0) {
+      // Shedinja: HP base 1 e HP final sempre 1.
+      stats[0] = base[0] == 1 ? 1 : static_cast<std::uint16_t>(core + level + 10);
+    } else {
+      int v = core + 5;
+      if (up != down) {
+        if (i - 1 == up) v = v * 110 / 100;
+        if (i - 1 == down) v = v * 90 / 100;
+      }
+      stats[i] = static_cast<std::uint16_t>(v);
+    }
+  }
+
+  tail[0] = level;
+  tail[1] = 0;
+  pkw::W16(tail, 2, stats[0]);  // HP atual = HP maximo: chega inteiro
+  pkw::W16(tail, 4, stats[0]);
+  pkw::W16(tail, 6, stats[1]);
+  pkw::W16(tail, 8, stats[2]);
+  pkw::W16(tail, 10, stats[3]);
+  pkw::W16(tail, 12, stats[4]);
+  pkw::W16(tail, 14, stats[5]);
+}
+
 // Grava um registro no slot, cifrado, respeitando o tamanho do REGISTRO. O que
 // sobra do stride (o "gap" entre registros, 64 bytes no Z-A) fica como estava
 // — escrita conservadora ate no espaco morto.
@@ -127,6 +177,12 @@ void PutRecord(std::uint8_t* dst, std::size_t record, Game g,
   std::vector<std::uint8_t> rec = WriteFor(g, mon);
   if (rec.empty()) return;
   if (rec.size() > record) rec.resize(record);
+  if (rec.size() < record) {
+    // Nucleo sem a cauda de party (Pokemon convertido): completa (spec 113).
+    const std::size_t core = rec.size();
+    rec.resize(record, 0);
+    if (record - core == 16) FillPartyTail16(rec.data() + core, mon);
+  }
   pkc::Encrypt(rec.data(), rec.size(), CryptoBlockOf(g));
   std::memcpy(dst, rec.data(), rec.size());
 }

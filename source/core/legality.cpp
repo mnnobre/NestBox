@@ -6,6 +6,8 @@
 
 #include "body_size.h"
 #include "game_moves.h"
+#include "gen3_moves.h"  // kMoveCount do gen3 (spec 112)
+#include "gen3_save.h"   // DecodeFullRecord/NationalDex/MaxExp (spec 112)
 #include "gmax_species.h"
 #include "pkm_convert.h"
 #include "pkm_crypto.h"
@@ -115,15 +117,20 @@ void CheckLevel(const pkm::Pokemon& p, LegalityResult& r) {
 
 // --- contest stats ---------------------------------------------------------
 //
-// O criterio NAO e "fora de faixa" (sao bytes, tudo cabe). E por CONTEXTO:
-// concurso so existe no gen3, no gen4 e no BDSP. Nos formatos modernos que
-// lemos, so o PB8 (BDSP) tem concurso — nos outros quatro qualquer valor
-// diferente de zero e adulteracao.
+// O criterio NAO e "fora de faixa" (sao bytes, tudo cabe). E por HISTORIA,
+// como no PkHeX (spec 113): concurso existe no gen3 (codigos de origem 1-5 e
+// 15), no gen4 (7-12) e no BDSP. Um Pokemon com ORIGEM nesses jogos pode ter
+// pontos legitimos mesmo guardado em pk8/pk9 — foi o falso positivo real que
+// barrou o Blastoise do dono voltando do Z-A (a subida preserva os bytes de
+// concurso do gen3, §7). Ate a spec 113 o criterio era por FORMATO, e isso
+// condenava qualquer origem antiga.
 //
-// Medido na spec 079: pega 633 Pokemon (SwSh 194 + SV 439) com ZERO falso
-// positivo nos 40 limpos.
+// Medido na spec 079 (regra por formato): pegava 633 Pokemon com zero falso
+// positivo nos 40 limpos; re-medido na 113 com a regra por origem.
 void CheckContest(const pkm::Pokemon& p, LegalityResult& r) {
-  const bool has_contest = p.format == pkm::Format::kPB8;
+  const bool has_contest =
+      p.format == pkm::Format::kPB8 ||
+      (p.origin_game >= 1 && p.origin_game <= 15);
 
   int sum = 0;
   for (int i = 0; i < 6; ++i) sum += p.contest_stats[i];
@@ -280,6 +287,55 @@ LegalityResult CheckLegality(const pkm::Pokemon& p) {
   CheckEcPid(p, r);
   CheckNickname(p, r);
   CheckBodySize(p, r);
+  return r;
+}
+
+LegalityResult CheckLegalityGen3(const std::uint8_t raw[80]) {
+  LegalityResult r;
+  const auto full = pokehome::gen3::DecodeFullRecord(raw);
+  if (!full) return r;  // vazio nao e adulteracao
+
+  const auto Add = [&r](const char* code, std::string reason) {
+    r.suspect = true;
+    r.issues.push_back({code, std::move(reason)});
+  };
+
+  // Bad egg: o proprio jogo ja condenou este registro (checksum quebrado em
+  // algum momento). E o unico veredito que vem pronto do save.
+  if (full->flags & 0x01) Add("bad_egg", "O jogo marcou este Pokemon como Bad Egg.");
+
+  const int dex = pokehome::gen3::NationalDex(full->species);
+  if (dex == 0) {
+    Add("species", "A especie " + std::to_string(full->species) +
+                       " nao existe no gen3.");
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    if (full->moves[i] >= pokehome::gen3::kMoveCount) {
+      Add("move", "O golpe " + std::to_string(full->moves[i]) +
+                      " nao existe no gen3.");
+    }
+  }
+
+  int ev_sum = 0;
+  for (int i = 0; i < 6; ++i) ev_sum += full->evs[i];
+  if (ev_sum > 510) {
+    Add("ev_sum",
+        "A soma dos EVs e " + std::to_string(ev_sum) + "; o maximo e 510.");
+  }
+
+  // Exp acima do teto da curva no nivel 100: nenhum caminho legitimo produz.
+  if (dex != 0 && full->experience > pokehome::gen3::MaxExp(full->species)) {
+    Add("exp_max", "A experiencia passa do maximo do nivel 100.");
+  }
+
+  // Idiomas do gen3: 1=JPN 2=ENG 3=FRE 4=ITA 5=GER 6=KOR(nunca usado) 7=SPA.
+  // Zero e acima de 7 nao existem; o 6 fica tolerado (na duvida, nao acusa).
+  if (full->language == 0 || full->language > 7) {
+    Add("language",
+        "O idioma " + std::to_string(full->language) + " nao existe.");
+  }
+
   return r;
 }
 

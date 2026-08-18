@@ -973,7 +973,12 @@ class SaveSource : public BoxSource {
     for (std::size_t b = 0; b < g3::kBoxCount; ++b) {
       for (std::size_t s = 0; s < g3::kSlotsPerBox; ++s) {
         const auto mon = g3::ReadBoxPokemonFrom(pc_, b, s);
-        if (mon && !mon->empty()) ++count_;
+        if (mon && !mon->empty()) {
+          ++count_;
+          // Verificador de legalidade gen3 (spec 112): mesma contagem que o
+          // save moderno mostra na barra.
+          if (legality::CheckLegalityGen3(mon->raw).suspect) ++suspect_;
+        }
       }
     }
   }
@@ -990,9 +995,25 @@ class SaveSource : public BoxSource {
   void SetCurrentBox(std::size_t box) override { current_box_ = box; }
 
   std::string Warning() const override {
-    if (checksum_ok_ == static_cast<int>(g3::kSectionCount)) return "";
-    return std::to_string(g3::kSectionCount - checksum_ok_) +
-           " secoes com checksum invalido";
+    if (checksum_ok_ != static_cast<int>(g3::kSectionCount)) {
+      return std::to_string(g3::kSectionCount - checksum_ok_) +
+             " secoes com checksum invalido";
+    }
+    if (suspect_ != 0) {
+      return std::to_string(suspect_) + " Pokemon nao podem ser transferidos";
+    }
+    return "";
+  }
+
+  // Por que este slot nao pode SAIR (spec 112): o verificador gen3. Os
+  // portoes de transferencia ja consultam a fonte de origem — dar a resposta
+  // aqui liga o bloqueio no FireRed sem mexer em mais nada.
+  std::string BlockedReason(std::size_t box, std::size_t slot) const override {
+    const auto mon = g3::ReadBoxPokemonFrom(pc_, box, slot);
+    if (!mon || mon->empty()) return "";
+    const legality::LegalityResult r = legality::CheckLegalityGen3(mon->raw);
+    if (!r.suspect) return "";
+    return r.issues.empty() ? "Pokemon suspeito" : r.issues[0].reason;
   }
 
   std::size_t Capacity() const override {
@@ -1075,6 +1096,7 @@ class SaveSource : public BoxSource {
   std::vector<std::uint8_t> pc_;
   int checksum_ok_ = 0;
   std::size_t count_ = 0;
+  std::size_t suspect_ = 0;
   std::size_t current_box_ = 0;
 };
 
@@ -1412,6 +1434,25 @@ class NestBoxSource : public BoxSource {
   // A memoria de moveset do banco (G11) — as conversoes do commit escrevem
   // nela, e ela persiste na secao v4 do arquivo (spec 111).
   msv::Memory& movesets() { return data_.movesets; }
+
+  // O banco tambem julga o que guarda (spec 112): slot gen3 pelo verificador
+  // gen3, slot moderno pelo CheckLegality. Parseia por chamada, como o At
+  // (TD-02 da spec 028: cache se pesar no console).
+  std::string BlockedReason(std::size_t box, std::size_t slot) const override {
+    const std::uint8_t* rec = data_.At(box, slot);
+    if (!rec || nest::SlotEmpty(rec)) return "";
+    legality::LegalityResult r;
+    if (nest::SlotFormatOf(rec) == nest::kGen3) {
+      r = legality::CheckLegalityGen3(nest::SlotPayload(rec));
+    } else {
+      const auto p = vw::ParseNestPayload(
+          nest::SlotFormatOf(rec), nest::SlotPayload(rec), nest::SlotSize(rec));
+      if (!p) return "";
+      r = legality::CheckLegality(*p);
+    }
+    if (!r.suspect) return "";
+    return r.issues.empty() ? "Pokemon suspeito" : r.issues[0].reason;
+  }
 
  private:
   std::size_t current_box_ = 0;

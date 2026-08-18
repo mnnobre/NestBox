@@ -43,4 +43,11 @@ struct LegalityResult {
 // vazio (species 0) devolve resultado limpo — slot vazio nao e adulteracao.
 LegalityResult CheckLegality(const pkm::Pokemon& p);
 
+// O mesmo nivel 2 para um registro gen3 de 80 bytes (spec 112) — decisao do
+// dono: TODAS as geracoes passam pelo verificador. Checa so o que o formato
+// PERMITE estar errado: bad egg, especie sem dex, golpe inexistente, soma de
+// EV, exp acima da curva, idioma. IV/natureza/PP-up sao campos de bits no
+// gen3 e nao tem como sair da faixa — checagem que nao pega nada e ruido.
+LegalityResult CheckLegalityGen3(const std::uint8_t raw[80]);
+
 }  // namespace legality

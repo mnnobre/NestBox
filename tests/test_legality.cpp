@@ -19,6 +19,8 @@
 #include <vector>
 
 #include "legality.h"
+#include "gen3_save.h"
+#include <cstring>
 #include "pkm_convert.h"
 #include "save_writer.h"
 
@@ -334,10 +336,129 @@ static void TestSinteticos() {
   }
 }
 
+// --- gen3 (spec 112) --------------------------------------------------------
+//
+// TODAS as geracoes passam pelo verificador (decisao do dono, 2026-08-18).
+// Um registro legitimo passa limpo; cada adulteracao que o formato permite e
+// acusada com o codigo certo — vermelho plantado, como manda a regra de
+// evidencia.
+static pokehome::gen3::FullRecord RegistroLegitimo() {
+  pokehome::gen3::FullRecord r;
+  r.personality = 0x12345678;
+  r.ot_id = 0x00420023;
+  pokehome::gen3::EncodeGen3String("PIKACHU", r.nickname_raw,
+                                   sizeof(r.nickname_raw));
+  r.language = 2;
+  r.flags = 0x02;
+  pokehome::gen3::EncodeGen3String("ASH", r.ot_name_raw,
+                                   sizeof(r.ot_name_raw));
+  r.species = 25;
+  r.experience = 100000;
+  r.moves[0] = 85;
+  r.moves[1] = 98;
+  r.pp[0] = 15;
+  const std::uint8_t evs[6] = {252, 100, 50, 100, 4, 4};
+  std::memcpy(r.evs, evs, 6);
+  r.origins = static_cast<std::uint16_t>(5 | (4u << 7) | (4u << 11));
+  return r;
+}
+
+static bool TemCodigo(const legality::LegalityResult& r, const char* code) {
+  for (const auto& i : r.issues) {
+    if (i.code == code) return true;
+  }
+  return false;
+}
+
+static void TestGen3() {
+  std::printf("\n=== gen3 (spec 112) ===\n");
+  namespace g3 = pokehome::gen3;
+
+  std::uint8_t raw[80];
+  g3::EncodeFullRecord(RegistroLegitimo(), raw);
+  Check(!legality::CheckLegalityGen3(raw).suspect,
+        "registro gen3 legitimo passa limpo");
+
+  std::uint8_t zeros[80] = {};
+  Check(!legality::CheckLegalityGen3(zeros).suspect,
+        "slot vazio nao e adulteracao");
+
+  {
+    auto r = RegistroLegitimo();
+    r.flags |= 0x01;
+    g3::EncodeFullRecord(r, raw);
+    Check(TemCodigo(legality::CheckLegalityGen3(raw), "bad_egg"),
+          "bad egg acusado");
+  }
+  {
+    auto r = RegistroLegitimo();
+    r.species = 500;  // acima da tabela gen3
+    g3::EncodeFullRecord(r, raw);
+    Check(TemCodigo(legality::CheckLegalityGen3(raw), "species"),
+          "especie inexistente acusada");
+  }
+  {
+    auto r = RegistroLegitimo();
+    r.moves[2] = 999;
+    g3::EncodeFullRecord(r, raw);
+    Check(TemCodigo(legality::CheckLegalityGen3(raw), "move"),
+          "golpe inexistente acusado");
+  }
+  {
+    auto r = RegistroLegitimo();
+    const std::uint8_t evs[6] = {255, 255, 255, 255, 255, 255};
+    std::memcpy(r.evs, evs, 6);
+    g3::EncodeFullRecord(r, raw);
+    Check(TemCodigo(legality::CheckLegalityGen3(raw), "ev_sum"),
+          "soma de EV acima de 510 acusada");
+  }
+  {
+    auto r = RegistroLegitimo();
+    r.experience = 3000000;  // Pikachu (MediumFast) capa em 1.000.000
+    g3::EncodeFullRecord(r, raw);
+    Check(TemCodigo(legality::CheckLegalityGen3(raw), "exp_max"),
+          "exp acima da curva acusada");
+  }
+  {
+    auto r = RegistroLegitimo();
+    r.language = 0;
+    g3::EncodeFullRecord(r, raw);
+    Check(TemCodigo(legality::CheckLegalityGen3(raw), "language"),
+          "idioma invalido acusado");
+  }
+}
+
+// --- concurso por ORIGEM (spec 113) ----------------------------------------
+//
+// O falso positivo real: Blastoise subido do FireRed (origem 4) com bytes de
+// concurso preservados era barrado ao voltar do Z-A. A regra virou "por
+// historia": origem gen3/gen4 pode ter concurso; nativo moderno nao.
+static void TestContestOrigem() {
+  std::printf("\n=== concurso por origem (spec 113) ===\n");
+
+  pkm::Pokemon p;
+  p.format = pkm::Format::kPK9;
+  p.species = pkm::SpeciesForFormat(9, pkm::Format::kPK9);  // Blastoise
+  p.pid = 0x12345678;
+  p.encryption_constant = p.pid;
+  p.exp = 10000;
+  p.contest_stats[0] = 47;  // cool vindo do gen3
+
+  p.origin_game = 4;  // FireRed
+  Check(!TemCodigo(legality::CheckLegality(p), "contest_absent"),
+        "origem gen3 com pontos de concurso NAO e acusada");
+
+  p.origin_game = 50;  // Scarlet
+  Check(TemCodigo(legality::CheckLegality(p), "contest_absent"),
+        "nativo moderno com pontos de concurso continua acusado");
+}
+
 int main() {
   TestFalsoPositivo();
   TestDeteccao();
   TestSinteticos();
+  TestGen3();
+  TestContestOrigem();
 
   std::printf("\n%s (%d falha%s)\n", g_failures == 0 ? "PASSOU" : "FALHOU",
               g_failures, g_failures == 1 ? "" : "s");
