@@ -74,4 +74,9 @@ std::optional<pkm::Pokemon> ParseNestPayload(std::uint8_t nest_fmt,
 // conversao.
 pkm::Format FormatOfGame(savew::Game g);
 
+// Serializa pelo writer do formato do proprio Pokemon (spec 125) — para
+// reconstruir o payload de um registro cujo moveset a NestBox restaurou.
+// Vazio se o formato e desconhecido.
+std::vector<std::uint8_t> WriteModern(const pkm::Pokemon& p);
+
 }  // namespace pokehome::view

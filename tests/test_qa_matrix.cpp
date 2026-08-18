@@ -18,6 +18,7 @@
 #include "moveset_memory.h"
 #include "nestbox_ab.h"
 #include "nestbox_file.h"
+#include "pk9.h"
 #include "pkm_convert.h"
 #include "pkm_crypto.h"
 #include "save_writer.h"
@@ -415,11 +416,61 @@ static void TestQ4() {
         "todo lixo que converteu foi acusado pela legalidade");
 }
 
+// N7 (spec 125): a NestBox "relembra" os golpes originais na chegada, e a
+// ida de mesmo formato reaplica os do jogo.
+static void TestN7() {
+  std::printf("\n=== N7: relembrar na NestBox (spec 125) ===\n");
+  std::uint8_t raw[80];
+  Faz(Gen3Opts{}, raw);
+  ms::Memory mem;
+
+  // Sobe para o Z-A: moveset vira o do Z-A.
+  auto up = g3x::ConvertUp(raw, pkm::Format::kPK9, ms::Game::kZA, &mem);
+  if (!up) { Check(false, "subida"); return; }
+  const auto za_moves = up->moves;
+  // COPIA o snapshot: o ponteiro do Recall aponta para dentro do vetor da
+  // memoria e o Remember de logo abaixo pode realoca-lo (dangling que so
+  // aparecia sob o ctest).
+  const auto* orig_ptr = mem.Recall(up->home_tracker, ms::Game::kGen3);
+  Check(orig_ptr != nullptr, "original memorizado na subida");
+  if (!orig_ptr) return;
+  const ms::Snapshot orig = *orig_ptr;
+
+  // Chega a NestBox: relembra os ORIGINAIS sem voltar ao jogo.
+  pkm::Pokemon banco = *up;
+  Check(ms::RestoreOnBank(banco, mem, ms::Game::kZA),
+        "RestoreOnBank restaurou na chegada");
+  Check(banco.moves == orig.moves,
+        "registro no banco tem os golpes ORIGINAIS");
+  Check(mem.Recall(up->home_tracker, ms::Game::kZA) != nullptr,
+        "moveset do Z-A ficou memorizado ao sair de la");
+
+  // Mover dentro da box nao re-memoriza nem muda nada.
+  pkm::Pokemon dentro = banco;
+  Check(!ms::RestoreOnBank(dentro, mem, ms::Game::kZA),
+        "mover dentro da box e no-op");
+
+  // Ida de MESMO formato de volta ao Z-A: ApplyOnEntry restaura os do Z-A.
+  pkm::Pokemon volta = banco;
+  const std::uint8_t lvl = sp::LevelFromExp(25, volta.exp);
+  Check(mem.ApplyOnEntry(volta, ms::Game::kZA, lvl),
+        "entrada no Z-A restaura da memoria");
+  Check(volta.moves == za_moves, "golpes do Z-A de volta na ida");
+
+  // E o registro reserializa com os golpes restaurados.
+  const auto bytes = pokehome::view::WriteModern(banco);
+  Check(!bytes.empty(), "WriteModern serializa o restaurado");
+  const auto re = pk9::Parse(bytes);
+  Check(re.has_value() && re->moves == orig.moves,
+        "payload regravado carrega os golpes originais");
+}
+
 int main() {
   std::printf("=== spec 114: matriz de validacao pre-PROD ===\n");
   TestN1();
   TestN2();
   TestN4();
+  TestN7();
   TestU1();
   TestU2();
   TestU3();

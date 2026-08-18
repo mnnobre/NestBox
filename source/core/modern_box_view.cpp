@@ -156,6 +156,18 @@ std::optional<pkm::Pokemon> ParseNestPayload(std::uint8_t nest_fmt,
   }
 }
 
+std::vector<std::uint8_t> WriteModern(const pkm::Pokemon& p) {
+  switch (p.format) {
+    case pkm::Format::kPK8: return pk8::Write(p);
+    case pkm::Format::kPK9: return pk9::Write(p);
+    case pkm::Format::kPA8: return pa8::Write(p);
+    case pkm::Format::kPB8: return pb8::Write(p);
+    case pkm::Format::kPB7: return pb7::Write(p);
+    case pkm::Format::kNone: break;
+  }
+  return {};
+}
+
 pkm::Format FormatOfGame(savew::Game g) {
   switch (g) {
     case savew::Game::kSwSh: return pkm::Format::kPK8;

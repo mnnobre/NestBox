@@ -143,6 +143,21 @@ inline learnset::Game ToLearnsetGame(Game g) {
   return learnset::Game::kLegendsArceus;
 }
 
+// --- Regras da NestBox (spec 125) ------------------------------------------
+
+// O bucket de memoria do jogo de ORIGEM do Pokemon, derivado do codigo
+// `origin_game` (com fallback pelo formato quando o codigo nao mapeia).
+Game OriginBucket(const pkm::Pokemon& p);
+
+// Chegada a NestBox: memoriza o moveset ATUAL sob `src` (o jogo de onde o
+// Pokemon saiu) e restaura o do jogo de ORIGEM — a regra do dono: "assim que
+// for pra nestbox e salvarmos, ele relembra os golpes". Devolve true se o
+// moveset mudou (o chamador reserializa o registro).
+//
+// Nao age quando: sem tracker; origem == src (nativo indo para a box);
+// origem sem snapshot; moveset ja e o original (mover dentro da box).
+bool RestoreOnBank(pkm::Pokemon& p, Memory& m, Game src);
+
 // --- Serializacao (secao v4 do arquivo NestBox) ----------------------------
 
 // Bytes da secao: contador u32 + n * kEntryBytes.

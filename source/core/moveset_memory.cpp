@@ -1,5 +1,6 @@
 #include "moveset_memory.h"
 
+#include "move_pp.h"      // PP base ao restaurar (spec 125)
 #include "pkm_convert.h"  // NationalDex: o learnset e indexado pela dex nacional
 #include "sha256.h"
 
@@ -91,6 +92,54 @@ bool AssignTracker(pkm::Pokemon& p) {
   if (p.home_tracker != 0) return false;
   if (p.empty()) return false;
   p.home_tracker = DeriveTracker(p);
+  return true;
+}
+
+// --- Regras da NestBox (spec 125) ------------------------------------------
+
+Game OriginBucket(const pkm::Pokemon& p) {
+  // Codigos de origem (GameVersion do PkHeX): gen3 1..5 e 15 (Colo/XD);
+  // LGPE 42/43; SwSh 44/45; PLA 47; BDSP 48/49; SV 50/51; Z-A 52 (conferido
+  // em save real — memoria za-origin-code-52).
+  const std::uint8_t o = p.origin_game;
+  if ((o >= 1 && o <= 5) || o == 15) return Game::kGen3;
+  if (o == 42 || o == 43) return Game::kLgpe;
+  if (o == 44 || o == 45) return Game::kSwSh;
+  if (o == 47) return Game::kLegendsArceus;
+  if (o == 48 || o == 49) return Game::kBdsp;
+  if (o == 50 || o == 51) return Game::kSV;
+  if (o == 52) return Game::kZA;
+  // Origem desconhecida: o formato e o palpite menos danoso.
+  switch (p.format) {
+    case pkm::Format::kPB7: return Game::kLgpe;
+    case pkm::Format::kPK8: return Game::kSwSh;
+    case pkm::Format::kPB8: return Game::kBdsp;
+    case pkm::Format::kPA8: return Game::kLegendsArceus;
+    default: return Game::kSV;
+  }
+}
+
+bool RestoreOnBank(pkm::Pokemon& p, Memory& m, Game src) {
+  if (p.home_tracker == 0 || p.empty()) return false;
+  const Game origem = OriginBucket(p);
+  if (origem == src) return false;  // nativo: moveset ja e "dele"
+
+  const Snapshot* s = m.Recall(p.home_tracker, origem);
+  if (!s) return false;
+  if (s->moves == p.moves) return false;  // ja restaurado (mover na box)
+
+  // Memoriza o moveset do jogo de onde saiu ANTES de sobrescrever — e o que
+  // a proxima ida aquele jogo restaura.
+  m.Remember(p, src);
+
+  p.moves = s->moves;
+  p.pp_ups = s->pp_ups;
+  for (int i = 0; i < 4; ++i) {
+    p.pp[i] = p.moves[i]
+                  ? pokehome::movepp::Modern(
+                        static_cast<std::uint8_t>(p.format), p.moves[i])
+                  : 0;
+  }
   return true;
 }
 

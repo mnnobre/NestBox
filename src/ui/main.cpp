@@ -53,6 +53,8 @@
 #include "legality.h"
 #include "modern_box_view.h"
 #include "pkm_convert.h"  // pkm::NationalDex para slots modernos (spec 106)
+#include "move_pp.h"      // PP base ao restaurar moveset (spec 125)
+#include "species_facts.h"  // LevelFromExp no deposito (spec 125)
 #include "gen3_transfer.h"  // conversao entre geracoes no gesto (spec 111)
 #include "nlog.h"
 #include "save_writer.h"
@@ -7228,6 +7230,29 @@ class BoxActivity : public brls::Activity {
           }
           ch.mon.modern =
               std::make_shared<const pkm::Pokemon>(std::move(*conv));
+        } else {
+          // MESMO formato (spec 125): a entrada num jogo que nao e o de
+          // origem tambem restaura o moveset memorizado de la (ou reseta
+          // pelo learnset, G11/G12) — antes so a conversao fazia isso, e o
+          // Pokemon voltava da NestBox com os golpes originais em vez dos
+          // do jogo.
+          pkm::Pokemon copy = *ch.mon.modern;
+          if (copy.home_tracker != 0 &&
+              msv::OriginBucket(copy) != dest_ms) {
+            const std::uint16_t dex = pkm::NationalDex(copy);
+            const std::uint8_t lvl =
+                pokehome::species::LevelFromExp(dex, copy.exp);
+            nest->movesets().ApplyOnEntry(copy, dest_ms, lvl);
+            for (int i = 0; i < 4; ++i) {
+              copy.pp[i] = copy.moves[i]
+                               ? pokehome::movepp::Modern(
+                                     static_cast<std::uint8_t>(copy.format),
+                                     copy.moves[i])
+                               : 0;
+            }
+            ch.mon.modern =
+                std::make_shared<const pkm::Pokemon>(std::move(copy));
+          }
         }
       }
     }
@@ -7262,9 +7287,27 @@ class BoxActivity : public brls::Activity {
       if (ref.source != kNestId) continue;
       if (mon.empty()) {
         nest->Clear(ref.box, ref.slot);
-      } else {
-        nest->Put(ref.box, ref.slot, mon);
+        continue;
       }
+      // Chegada a NestBox (spec 125): o Pokemon "relembra" os golpes do
+      // jogo de ORIGEM ja aqui, sem precisar voltar la — regra do dono. O
+      // moveset do jogo de onde ele saiu fica memorizado para a proxima
+      // ida. So age em mon moderno vindo do save aberto; mover dentro da
+      // caixa nao re-memoriza (guarda do RestoreOnBank).
+      if (mon.modern && modern) {
+        pkm::Pokemon copy = *mon.modern;
+        if (msv::RestoreOnBank(copy, nest->movesets(),
+                               MsGameOfSave(modern->GameEnum()))) {
+          copy.raw = vw::WriteModern(copy);
+          if (!copy.raw.empty()) {
+            g3::BoxPokemon restaurado = mon;
+            restaurado.modern = std::make_shared<const pkm::Pokemon>(copy);
+            nest->Put(ref.box, ref.slot, restaurado);
+            continue;
+          }
+        }
+      }
+      nest->Put(ref.box, ref.slot, mon);
     }
     if (!SaveNestBox(nest->data())) {
       NLOG_ACT("FALHA salvar: SaveNestBox recusou. O save NAO foi tocado.");
