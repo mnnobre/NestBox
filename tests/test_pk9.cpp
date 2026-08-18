@@ -164,11 +164,11 @@ static void TestFixture(const std::filesystem::path& pkm) {
   Eq(p.ability, AsInt(j, "Ability"), t + "Ability");
   Eq(p.ability_number, AsInt(j, "AbilityNumber"), t + "AbilityNumber");
   Eq(p.pid, AsInt(j, "PID"), t + "PID");
-  // Genero: o PkHeX devolve 2 (sem genero) derivando da tabela da especie;
-  // o binario so tem o bit. Comparamos apenas quando ha genero de verdade.
-  if (AsInt(j, "Gender") != 2) {
-    Eq(p.gender, AsInt(j, "Gender"), t + "Gender");
-  }
+  // Genero SEMPRE comparado (spec 109). A excecao "so quando != 2" mascarava
+  // o bug real: o PK9 guarda o sexo nos bits 1-2 do byte 0x22 (o PK8 usa os
+  // bits 2-3) e o parser lia na posicao errada — todo sem-sexo virava femea e
+  // toda femea virava macho. O PkHeX grava o campo no binario; nao e derivado.
+  Eq(p.gender, AsInt(j, "Gender"), t + "Gender");
   Eq(p.language, AsInt(j, "Language"), t + "Language");
   Eq(p.is_egg, AsInt(j, "IsEgg"), t + "IsEgg");
   Eq(p.is_nicknamed, AsInt(j, "IsNicknamed"), t + "IsNicknamed");

@@ -1,5 +1,6 @@
 #include "moveset_memory.h"
 
+#include "pkm_convert.h"  // NationalDex: o learnset e indexado pela dex nacional
 #include "sha256.h"
 
 namespace pokehome::moveset {
@@ -97,7 +98,11 @@ bool AssignTracker(pkm::Pokemon& p) {
 
 int ResetMovesByLevel(pkm::Pokemon& p, Game game, std::uint8_t level) {
   std::uint16_t out[4] = {0, 0, 0, 0};
-  const int n = learnset::MovesAtLevel(ToLearnsetGame(game), p.species, p.form,
+  // Pela dex NACIONAL (spec 109): o learnset e indexado por ela, e no pk9 o
+  // `p.species` cru e o indice interno do gen9 — consultar com ele erraria a
+  // especie em 106 casos, o mesmo bug da spec 076/069.
+  const int n = learnset::MovesAtLevel(ToLearnsetGame(game),
+                                       pkm::NationalDex(p), p.form,
                                        level, out);
   if (n == 0) return 0;
   for (int i = 0; i < 4; ++i) {

@@ -377,6 +377,146 @@ BoxPokemon ParseBoxPokemonRecord(const std::uint8_t* rec) {
   return mon;
 }
 
+// --- Registro completo (spec 108) ------------------------------------------
+
+namespace {
+
+void PutU16At(std::uint8_t* p, std::uint16_t v) {
+  p[0] = static_cast<std::uint8_t>(v & 0xFF);
+  p[1] = static_cast<std::uint8_t>(v >> 8);
+}
+
+void PutU32At(std::uint8_t* p, std::uint32_t v) {
+  p[0] = static_cast<std::uint8_t>(v & 0xFF);
+  p[1] = static_cast<std::uint8_t>((v >> 8) & 0xFF);
+  p[2] = static_cast<std::uint8_t>((v >> 16) & 0xFF);
+  p[3] = static_cast<std::uint8_t>((v >> 24) & 0xFF);
+}
+
+// Inverso de DecodeChar. Cobre o mesmo intervalo; sem mapa vira espaco (0x00).
+std::uint8_t EncodeChar(char c) {
+  if (c >= '0' && c <= '9') return static_cast<std::uint8_t>(0xA1 + (c - '0'));
+  if (c >= 'A' && c <= 'Z') return static_cast<std::uint8_t>(0xBB + (c - 'A'));
+  if (c >= 'a' && c <= 'z') return static_cast<std::uint8_t>(0xD5 + (c - 'a'));
+  if (c == '-') return 0xAE;
+  if (c == '.') return 0xAD;
+  if (c == '/') return 0xBA;
+  return 0x00;  // espaco
+}
+
+}  // namespace
+
+std::optional<FullRecord> DecodeFullRecord(const std::uint8_t* rec) {
+  if (!rec) return std::nullopt;
+  FullRecord r;
+  r.personality = ReadU32(rec + 0x00);
+  r.ot_id = ReadU32(rec + 0x04);
+  if (r.personality == 0 && r.ot_id == 0) return std::nullopt;  // vazio
+
+  std::memcpy(r.nickname_raw, rec + 0x08, sizeof(r.nickname_raw));
+  r.language = rec[0x12];
+  r.flags = rec[0x13];
+  std::memcpy(r.ot_name_raw, rec + 0x14, sizeof(r.ot_name_raw));
+  r.markings = rec[0x1B];
+  // 0x1C-0x1D e o checksum: derivado na escrita, nao carregado.
+  r.unused_1e = ReadU16(rec + 0x1E);
+
+  const auto blocks = DecryptSubstructures(rec, r.personality, r.ot_id);
+  const std::uint8_t* g = blocks.data();
+  const std::uint8_t* a = blocks.data() + 12;
+  const std::uint8_t* e = blocks.data() + 24;
+  const std::uint8_t* m = blocks.data() + 36;
+
+  r.species = ReadU16(g);
+  r.held_item = ReadU16(g + 2);
+  r.experience = ReadU32(g + 4);
+  r.pp_bonuses = g[8];
+  r.friendship = g[9];
+  r.growth_unknown = ReadU16(g + 10);
+
+  for (int i = 0; i < 4; ++i) {
+    r.moves[i] = ReadU16(a + i * 2);
+    r.pp[i] = a[8 + i];
+  }
+  for (int i = 0; i < 6; ++i) {
+    r.evs[i] = e[i];
+    r.contest[i] = e[6 + i];
+  }
+  r.pokerus = m[0];
+  r.met_location = m[1];
+  r.origins = ReadU16(m + 2);
+  r.iv32 = ReadU32(m + 4);
+  r.ribbons = ReadU32(m + 8);
+  return r;
+}
+
+void EncodeFullRecord(const FullRecord& r, std::uint8_t out[80]) {
+  std::memset(out, 0, 80);
+  PutU32At(out + 0x00, r.personality);
+  PutU32At(out + 0x04, r.ot_id);
+  std::memcpy(out + 0x08, r.nickname_raw, sizeof(r.nickname_raw));
+  out[0x12] = r.language;
+  out[0x13] = r.flags;
+  std::memcpy(out + 0x14, r.ot_name_raw, sizeof(r.ot_name_raw));
+  out[0x1B] = r.markings;
+  PutU16At(out + 0x1E, r.unused_1e);
+
+  // Substruturas na ordem CANONICA primeiro (Growth, Attacks, EVs, Misc).
+  std::uint8_t canonical[48] = {};
+  std::uint8_t* g = canonical;
+  std::uint8_t* a = canonical + 12;
+  std::uint8_t* e = canonical + 24;
+  std::uint8_t* m = canonical + 36;
+  PutU16At(g, r.species);
+  PutU16At(g + 2, r.held_item);
+  PutU32At(g + 4, r.experience);
+  g[8] = r.pp_bonuses;
+  g[9] = r.friendship;
+  PutU16At(g + 10, r.growth_unknown);
+  for (int i = 0; i < 4; ++i) {
+    PutU16At(a + i * 2, r.moves[i]);
+    a[8 + i] = r.pp[i];
+  }
+  for (int i = 0; i < 6; ++i) {
+    e[i] = r.evs[i];
+    e[6 + i] = r.contest[i];
+  }
+  m[0] = r.pokerus;
+  m[1] = r.met_location;
+  PutU16At(m + 2, r.origins);
+  PutU32At(m + 4, r.iv32);
+  PutU32At(m + 8, r.ribbons);
+
+  // Checksum do registro (0x1C): soma u16 dos 48 bytes EM CLARO. E o que o
+  // jogo confere — errado vira bad egg.
+  std::uint32_t sum = 0;
+  for (int i = 0; i < 48; i += 2) sum += ReadU16(canonical + i);
+  PutU16At(out + 0x1C, static_cast<std::uint16_t>(sum));
+
+  // Embaralha para a ordem fisica do personality e cifra com PID^OTID.
+  // order[phys] = bloco canonico que ocupa a posicao fisica phys — o inverso
+  // exato do DecryptSubstructures.
+  const auto& order = BlockOrders()[r.personality % 24];
+  const std::uint32_t key = r.personality ^ r.ot_id;
+  for (std::size_t phys = 0; phys < 4; ++phys) {
+    const std::uint8_t* src = canonical + static_cast<std::size_t>(order[phys]) * 12;
+    for (std::size_t i = 0; i < 12; i += 4) {
+      PutU32At(out + 32 + phys * 12 + i, ReadU32(src + i) ^ key);
+    }
+  }
+}
+
+void EncodeGen3String(const std::string& utf8, std::uint8_t* out,
+                      std::size_t max_len) {
+  std::size_t n = 0;
+  for (std::size_t i = 0; i < utf8.size() && n < max_len; ++i) {
+    const unsigned char c = static_cast<unsigned char>(utf8[i]);
+    if (c >= 0x80) continue;  // multibyte: sem mapa no charset gen3
+    out[n++] = EncodeChar(static_cast<char>(c));
+  }
+  for (; n < max_len; ++n) out[n] = 0xFF;
+}
+
 std::string NatureName(std::uint8_t nature) {
   if (nature >= kNatureCount) return "???";
   return kNatureNames[nature];
@@ -602,6 +742,16 @@ std::uint16_t SpeciesTableSize() {
 int NationalDex(std::uint16_t species) {
   if (species >= kSpeciesCount) return 0;
   return kNationalDex[species];
+}
+
+std::uint16_t InternalFromDex(int national_dex) {
+  if (national_dex <= 0) return 0;
+  // ponytail: varredura linear (386 entradas) na descida, que e rara; tabela
+  // inversa se algum dia pesar.
+  for (std::uint16_t i = 1; i < kSpeciesCount; ++i) {
+    if (kNationalDex[i] == national_dex) return i;
+  }
+  return 0;
 }
 
 }  // namespace pokehome::gen3

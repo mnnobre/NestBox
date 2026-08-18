@@ -5,6 +5,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -702,6 +703,107 @@ void TestRawSave(const std::vector<std::uint8_t>& file) {
 
 }  // namespace
 
+// --- Roundtrip do registro completo (spec 108) ------------------------------
+//
+// EncodeFullRecord e o inverso exato do DecodeFullRecord: as 24 permutacoes de
+// substrutura, a cifra PID^OTID e o checksum saem identicos. Sintetico e
+// deterministico — cobre todas as ordens sem depender de save em disco.
+void TestFullRecordRoundtrip() {
+  std::printf("registro completo (spec 108):\n");
+
+  bool all_ok = true, parse_ok = true;
+  for (std::uint32_t k = 0; k < 24; ++k) {
+    g3::FullRecord r;
+    r.personality = 0x1000 + k;  // percorre os 24 personality % 24
+    r.ot_id = 0xA1B2C3D4 ^ k;
+    for (int i = 0; i < 10; ++i) r.nickname_raw[i] = static_cast<std::uint8_t>(0xBB + i);
+    r.language = 2;
+    r.flags = 0x02;
+    for (int i = 0; i < 7; ++i) r.ot_name_raw[i] = static_cast<std::uint8_t>(0xD5 + i);
+    r.markings = 0x5;
+    r.unused_1e = 0x1234;
+    r.species = 25;
+    r.held_item = 13;
+    r.experience = 46873 + k;
+    r.pp_bonuses = 0x1B;
+    r.friendship = 200;
+    r.growth_unknown = 0xBEEF;
+    for (int i = 0; i < 4; ++i) { r.moves[i] = static_cast<std::uint16_t>(33 + i); r.pp[i] = static_cast<std::uint8_t>(10 + i); }
+    for (int i = 0; i < 6; ++i) { r.evs[i] = static_cast<std::uint8_t>(i * 7); r.contest[i] = static_cast<std::uint8_t>(i * 3); }
+    r.pokerus = 0x11;
+    r.met_location = 88;
+    r.origins = static_cast<std::uint16_t>(5 | (4u << 7) | (3u << 11));
+    r.iv32 = (31u) | (30u << 5) | (29u << 10) | (28u << 15) | (27u << 20) |
+             (26u << 25) | (1u << 31);
+    r.ribbons = 0x00050301;
+
+    std::uint8_t raw[80];
+    g3::EncodeFullRecord(r, raw);
+    const auto back = g3::DecodeFullRecord(raw);
+    if (!back) { all_ok = false; continue; }
+    std::uint8_t raw2[80];
+    g3::EncodeFullRecord(*back, raw2);
+    if (std::memcmp(raw, raw2, 80) != 0) all_ok = false;
+
+    // O parser de tela concorda com o que foi codificado.
+    const g3::BoxPokemon mon = g3::ParseBoxPokemonRecord(raw);
+    if (mon.species != r.species || mon.experience != r.experience ||
+        mon.moves[0] != r.moves[0] || mon.ability_bit != 1 ||
+        mon.met_level != 5 || mon.display_ball != 3 || mon.ivs[0] != 31) {
+      parse_ok = false;
+    }
+  }
+  Check(all_ok, "roundtrip byte-identico nas 24 permutacoes de substrutura");
+  Check(parse_ok, "ParseBoxPokemonRecord le o que EncodeFullRecord gravou");
+
+  Check(!g3::DecodeFullRecord(nullptr).has_value(), "nullptr e vazio");
+  std::uint8_t zeros[80] = {};
+  Check(!g3::DecodeFullRecord(zeros).has_value(), "slot zerado e vazio");
+
+  // EncodeGen3String: ida e volta pelo DecodeString do parser.
+  std::uint8_t nome[10];
+  g3::EncodeGen3String("Pika-2", nome, sizeof(nome));
+  std::uint8_t raw[80] = {};
+  g3::FullRecord r;
+  r.personality = 1;
+  r.ot_id = 2;
+  std::memcpy(r.nickname_raw, nome, sizeof(r.nickname_raw));
+  r.species = 25;
+  g3::EncodeFullRecord(r, raw);
+  Check(g3::ParseBoxPokemonRecord(raw).nickname == "Pika-2",
+        "EncodeGen3String produz nome que o parser le de volta");
+}
+
+// Roundtrip sobre um save REAL: todo Pokemon ocupado do PC volta byte a byte.
+void TestFullRecordSweep(const std::vector<std::uint8_t>& file,
+                         const char* label) {
+  std::printf("registro completo no save real (%s):\n", label);
+  const auto save = g3::ParseSave(file);
+  if (!save) { Check(false, "save abriu"); return; }
+  const auto pc = g3::BuildPcBuffer(file, *save);
+  std::size_t vistos = 0, identicos = 0;
+  for (std::size_t b = 0; b < g3::kBoxCount; ++b) {
+    for (std::size_t s = 0; s < g3::kSlotsPerBox; ++s) {
+      const auto mon = g3::ReadBoxPokemonFrom(pc, b, s);
+      if (!mon || mon->empty()) continue;
+      ++vistos;
+      const auto full = g3::DecodeFullRecord(mon->raw);
+      if (!full) continue;
+      std::uint8_t rebuilt[80];
+      g3::EncodeFullRecord(*full, rebuilt);
+      if (std::memcmp(rebuilt, mon->raw, 80) == 0) ++identicos;
+    }
+  }
+  if (vistos == 0) {
+    std::printf("  SKIP PC sem Pokemon neste save\n");
+    return;
+  }
+  std::printf("    %zu Pokemon no PC, %zu roundtrips identicos\n", vistos,
+              identicos);
+  Check(vistos == identicos,
+        "todos os registros reais voltam byte-identicos");
+}
+
 int main(int argc, char** argv) {
   TestChecksum();
   TestRejectsGarbage();
@@ -712,13 +814,20 @@ int main(int argc, char** argv) {
   TestEscritaNoPcBuffer();
   TestNomePorDex();
   TestTabelasConcordam();
+  TestFullRecordRoundtrip();
 
   const auto raw = ReadFile("leafgreen-test.sav");
   if (raw.empty()) {
     std::printf("save cru:\n  SKIP 'leafgreen-test.sav' nao encontrado\n");
   } else {
     TestRawSave(raw);
+    TestFullRecordSweep(raw, "leafgreen-test.sav");
   }
+
+  // Save real do simulador, quando a arvore do dono estiver por perto.
+  const auto fr = ReadFile(
+      "../build/switch-sim/saves/0100554023408000/Amaral/FireRed_e.sav");
+  if (!fr.empty()) TestFullRecordSweep(fr, "FireRed do simulador");
 
   const std::string path =
       (argc >= 2) ? argv[1] : "pokemon-firered-leafgreen-version.34462.sps";

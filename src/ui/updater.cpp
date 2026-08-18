@@ -12,6 +12,8 @@
 #if defined(__SWITCH__) && defined(NESTBOX_HAS_CURL)
 #include <curl/curl.h>
 #include <switch.h>
+
+#include "nlog.h"
 #define NESTBOX_UPDATE_ENABLED 1
 #endif
 
@@ -115,7 +117,12 @@ bool HasNetwork() {
 UpdateInfo CheckForUpdate() {
   UpdateInfo info;
 #ifdef NESTBOX_UPDATE_ENABLED
-  if (!HasNetwork()) return info;
+  // Cada saida silenciosa vira uma linha de log (spec 111): "o update nao
+  // apareceu" precisa ser diagnosticavel pelo nestbox.log.
+  if (!HasNetwork()) {
+    NLOG_ACT("update: sem internet na abertura — checagem pulada");
+    return info;
+  }
 
   CURL* curl = curl_easy_init();
   if (!curl) return info;
@@ -137,13 +144,25 @@ UpdateInfo CheckForUpdate() {
 
   const CURLcode rc = curl_easy_perform(curl);
   curl_easy_cleanup(curl);
-  if (rc != CURLE_OK || body.empty()) return info;
+  if (rc != CURLE_OK || body.empty()) {
+    NLOG_ACT("update: consulta ao GitHub falhou (curl rc=%d, %zu bytes)",
+             static_cast<int>(rc), body.size());
+    return info;
+  }
 
   std::string tag = JsonField(body, "tag_name");
-  if (tag.empty()) return info;
+  if (tag.empty()) {
+    NLOG_ACT("update: resposta sem tag_name (rate limit?)");
+    return info;
+  }
   if (tag[0] == 'v') tag.erase(0, 1);
 
-  if (!IsNewer(tag, CurrentVersion())) return info;
+  if (!IsNewer(tag, CurrentVersion())) {
+    NLOG_ACT("update: ja na versao mais recente (%s local, %s remota)",
+             CurrentVersion(), tag.c_str());
+    return info;
+  }
+  NLOG_ACT("update: %s disponivel (local %s)", tag.c_str(), CurrentVersion());
 
   info.latest_version = tag;
   info.download_url = JsonField(body, "browser_download_url");

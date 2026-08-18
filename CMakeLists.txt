@@ -4,7 +4,7 @@ project(pokehome C CXX)
 
 # Versao do app. Deve casar com a tag da release no GitHub — e o que o
 # auto-update compara. Ao publicar uma release nova, subir aqui tambem.
-set(NESTBOX_VERSION "0.9.2")
+set(NESTBOX_VERSION "0.9.3")
 # Repo publico so de releases — o codigo vive no repo privado mnnobre/NestBox.
 set(NESTBOX_REPO "mnnobre/NestBox")
 
@@ -32,6 +32,7 @@ source/core/pa8.cpp
   source/core/moveset_memory.cpp
   source/core/transfer.cpp
   source/core/legality.cpp
+  source/core/gen3_transfer.cpp
   source/core/modern_box_view.cpp
   source/core/nlog.cpp
 )
@@ -176,6 +177,11 @@ add_test(NAME tracker_moveset COMMAND test_tracker_moveset)
 add_executable(test_gen3 tests/test_gen3.cpp)
 target_link_libraries(test_gen3 PRIVATE pokehome_core)
 add_test(NAME gen3 COMMAND test_gen3)
+
+# Subida gen3 -> moderno (spec 109).
+add_executable(test_gen3_transfer tests/test_gen3_transfer.cpp)
+target_link_libraries(test_gen3_transfer PRIVATE pokehome_core)
+add_test(NAME gen3_transfer COMMAND test_gen3_transfer)
 
 # Movimentacao entre caixas (spec 019). Header-only: linka o core so pelos
 # tipos de gen3_save.h.

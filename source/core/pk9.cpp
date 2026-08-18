@@ -144,7 +144,10 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.nature = d[kNature];
   p.stat_nature = d[kStatNature];
   p.fateful_encounter = d[kFatefulGender] & 1;
-  p.gender = (d[kFatefulGender] >> 2) & 3;
+  // No PK9 o sexo mora nos bits 1-2 — DIFERENTE do PK8/PA8/PB8 (bits 2-3).
+  // Conferido nas fixtures (spec 109): Gimmighoul/Roaring Moon/Miraidon, sem
+  // sexo, gravam 0x04 = 2<<1; na convencao do PK8 isso leria "femea".
+  p.gender = (d[kFatefulGender] >> 1) & 3;
   p.form = static_cast<std::uint8_t>(U16(d, kForm));
 
   for (int i = 0; i < 6; ++i) p.evs[i] = d[kEvs + i];
@@ -254,9 +257,10 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   pkw::W32(d, kPid, p.pid);
   d[kNature] = p.nature;
   d[kStatNature] = p.stat_nature;
+  // Bits 1-2 para o sexo (ver o comentario do Parse): preserva os bits 3-7.
   d[kFatefulGender] = static_cast<std::uint8_t>(
-      (d[kFatefulGender] & 0xF2) | (p.fateful_encounter ? 1 : 0) |
-      ((p.gender & 3) << 2));
+      (d[kFatefulGender] & 0xF8) | (p.fateful_encounter ? 1 : 0) |
+      ((p.gender & 3) << 1));
   pkw::W16(d, kForm, p.form);
 
   for (int i = 0; i < 6; ++i) d[kEvs + i] = p.evs[i];

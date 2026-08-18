@@ -51,11 +51,19 @@ bool AssignTracker(pkm::Pokemon& p);
 
 // --- G11: memoria de moveset por (tracker, jogo) ---------------------------
 
-// Quais jogos memorizam moveset. Sao os de engine de golpes propria, os mesmos
-// que a §7 cita como causadores do reset — e os mesmos que learnset.h cobre.
+// Quais jogos memorizam moveset. Ate a spec 108 eram so PLA/BDSP (engine de
+// golpes propria); a transferencia entre geracoes (TD-D5 da descoberta)
+// estendeu a substituicao a TODO cruzamento de geracao, entao cada alvo tem a
+// sua memoria. O valor e SERIALIZADO no arquivo do NestBox: nunca renumere,
+// so acrescente no fim.
 enum class Game : std::uint8_t {
   kLegendsArceus = 0,
   kBdsp = 1,
+  kGen3 = 2,   // familia GBA inteira: o moveset gen3 original de um Pokemon
+  kSwSh = 3,
+  kSV = 4,
+  kZA = 5,
+  kLgpe = 6,
   kCount,
 };
 
@@ -116,9 +124,23 @@ int ResetMovesByLevel(pkm::Pokemon& p, Game game, std::uint8_t level);
 
 // Ponte para o enum do learnset. Os dois existem separados de proposito: o
 // learnset e tabela gerada, esta e a API do produto.
+//
+// kGen3 e a FAMILIA: a memoria nao distingue FireRed de Emerald (o moveset
+// original e um so), mas o learnset e por jogo — o reset ao ENTRAR num gen3
+// especifico usa a tabela daquele jogo, que o chamador conhece (spec 110).
+// Aqui kGen3 cai no Emerald como representante.
 inline learnset::Game ToLearnsetGame(Game g) {
-  return g == Game::kBdsp ? learnset::Game::kBdsp
-                          : learnset::Game::kLegendsArceus;
+  switch (g) {
+    case Game::kLegendsArceus: return learnset::Game::kLegendsArceus;
+    case Game::kBdsp: return learnset::Game::kBdsp;
+    case Game::kSwSh: return learnset::Game::kSwSh;
+    case Game::kSV: return learnset::Game::kSV;
+    case Game::kZA: return learnset::Game::kZA;
+    case Game::kLgpe: return learnset::Game::kLgpe;
+    case Game::kGen3: return learnset::Game::kEmerald;
+    case Game::kCount: break;
+  }
+  return learnset::Game::kLegendsArceus;
 }
 
 // --- Serializacao (secao v4 do arquivo NestBox) ----------------------------

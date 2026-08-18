@@ -260,6 +260,60 @@ bool WriteBoxPokemonTo(std::vector<std::uint8_t>& pc_buffer, std::size_t box,
 bool ApplyPcBuffer(std::vector<std::uint8_t>& file, const SaveFile& save,
                    const std::vector<std::uint8_t>& pc_buffer);
 
+// --- Registro completo de 80 bytes (spec 108) ------------------------------
+//
+// O parser de tela (ParseBoxPokemonRecord) descarta o que a tela nao usa:
+// palavra de origins inteira, ribbons, contest, pokerus, met_location, flags.
+// O construtor da transferencia entre geracoes precisa de TUDO — dai o par
+// DecodeFullRecord/EncodeFullRecord, cujo criterio e roundtrip byte-identico.
+//
+// Os nomes ficam CRUS (charset gen3) de proposito: o roundtrip nao pode
+// depender de uma conversao de charset ser bijetora. Quem cria nome novo na
+// descida usa EncodeGen3String.
+struct FullRecord {
+  std::uint32_t personality = 0;
+  std::uint32_t ot_id = 0;
+  std::uint8_t nickname_raw[10] = {};
+  std::uint8_t language = 0;
+  std::uint8_t flags = 0;  // 0x13: bad egg / has species / uses egg name
+  std::uint8_t ot_name_raw[7] = {};
+  std::uint8_t markings = 0;
+  std::uint16_t unused_1e = 0;  // 0x1E, preservado
+
+  // Growth
+  std::uint16_t species = 0;  // indice INTERNO gen3
+  std::uint16_t held_item = 0;
+  std::uint32_t experience = 0;
+  std::uint8_t pp_bonuses = 0;
+  std::uint8_t friendship = 0;
+  std::uint16_t growth_unknown = 0;
+  // Attacks
+  std::uint16_t moves[4] = {};
+  std::uint8_t pp[4] = {};
+  // EVs & Condition
+  std::uint8_t evs[6] = {};
+  std::uint8_t contest[6] = {};
+  // Misc
+  std::uint8_t pokerus = 0;
+  std::uint8_t met_location = 0;
+  std::uint16_t origins = 0;  // met_level | origem<<7 | bola<<11 | sexo_ot<<15
+  std::uint32_t iv32 = 0;     // 6x5 bits de IV | egg<<30 | ability<<31
+  std::uint32_t ribbons = 0;
+};
+
+// Decodifica os 80 bytes por completo. nullopt para slot vazio.
+std::optional<FullRecord> DecodeFullRecord(const std::uint8_t* rec);
+
+// O inverso exato: substruturas na ordem do personality, cifra PID^OTID e o
+// checksum do registro (0x1C) DERIVADO dos 48 bytes em claro — e ele que o
+// jogo confere; errado vira bad egg.
+void EncodeFullRecord(const FullRecord& r, std::uint8_t out[80]);
+
+// UTF-8 -> charset gen3 (para nomes novos na descida, spec 110). Trunca em
+// max_len e completa com o terminador 0xFF. Caracter sem mapa vira espaco.
+void EncodeGen3String(const std::string& utf8, std::uint8_t* out,
+                      std::size_t max_len);
+
 // Nome da especie no indice interno do gen3 (National Dex reordenada).
 // Devolve "???" para indices desconhecidos.
 std::string SpeciesName(std::uint16_t species);
@@ -272,6 +326,11 @@ std::uint16_t SpeciesTableSize();
 // for invalido. Os indices 1-251 coincidem; 277+ sao deslocados (277 -> 252).
 // Necessario porque os arquivos de sprite sao nomeados por National Dex.
 int NationalDex(std::uint16_t species);
+
+// O inverso: indice interno gen3 de uma National Dex. 0 se a especie nao
+// existe no gen3 (dex > 386 ou buraco da tabela) — e o portao da descida
+// (spec 110).
+std::uint16_t InternalFromDex(int national_dex);
 
 // Nome da natureza (0-24). "???" se fora da faixa.
 std::string NatureName(std::uint8_t nature);

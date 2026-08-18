@@ -53,6 +53,7 @@
 #include "legality.h"
 #include "modern_box_view.h"
 #include "pkm_convert.h"  // pkm::NationalDex para slots modernos (spec 106)
+#include "gen3_transfer.h"  // conversao entre geracoes no gesto (spec 111)
 #include "nlog.h"
 #include "save_writer.h"
 #include "updater.h"
@@ -64,6 +65,9 @@ namespace nest = pokehome::nest;
 namespace bk = pokehome::backup;
 namespace cp = pokehome::compat;
 namespace vw = pokehome::view;
+namespace msv = pokehome::moveset;
+namespace lsn = pokehome::learnset;
+namespace g3x = pokehome::g3x;
 
 namespace {
 
@@ -1192,6 +1196,7 @@ class ModernSaveSource : public BoxSource {
 
   // O formato pkm que ESTE save armazena (portao do saque, TD-02 da spec 106).
   pkm::Format PkmFormat() const { return vw::FormatOfGame(save_.game); }
+  savew::Game GameEnum() const { return save_.game; }
 
   // Para o backup obrigatorio do commit: os bytes ORIGINAIS do arquivo e um
   // nome de arquivo valido para o .bak.
@@ -1404,37 +1409,113 @@ class NestBoxSource : public BoxSource {
   // app perde tudo, igual a sair do HOME sem salvar (TD-03 da spec 019).
   bool CanAccept() const override { return true; }
 
+  // A memoria de moveset do banco (G11) — as conversoes do commit escrevem
+  // nela, e ela persiste na secao v4 do arquivo (spec 111).
+  msv::Memory& movesets() { return data_.movesets; }
+
  private:
   std::size_t current_box_ = 0;
   nest::NestData data_;
 };
 
-// Portao de formato entre fontes (specs 086/106). Por que ESTE Pokemon nao
-// pode entrar NESTE destino? Vazio = pode.
+// --- Mapas da conversao entre geracoes (spec 111) ---------------------------
+
+// savew::Game -> jogo da memoria de moveset.
+msv::Game MsGameOfSave(savew::Game g) {
+  switch (g) {
+    case savew::Game::kSwSh: return msv::Game::kSwSh;
+    case savew::Game::kSV: return msv::Game::kSV;
+    case savew::Game::kPLA: return msv::Game::kLegendsArceus;
+    case savew::Game::kBDSP: return msv::Game::kBdsp;
+    case savew::Game::kLGPE: return msv::Game::kLgpe;
+    case savew::Game::kZA: return msv::Game::kZA;
+  }
+  return msv::Game::kSV;
+}
+
+// O jogo de onde o moveset ATUAL de um pkm veio, para a memoria. O pk9 serve
+// a dois jogos: o codigo de origem 52 e o Z-A (conferido em save real — ver
+// memoria za-origin-code-52).
+msv::Game MsGameOfPkm(const pkm::Pokemon& p) {
+  switch (p.format) {
+    case pkm::Format::kPB7: return msv::Game::kLgpe;
+    case pkm::Format::kPK8: return msv::Game::kSwSh;
+    case pkm::Format::kPB8: return msv::Game::kBdsp;
+    case pkm::Format::kPA8: return msv::Game::kLegendsArceus;
+    case pkm::Format::kPK9:
+      return p.origin_game == 52 ? msv::Game::kZA : msv::Game::kSV;
+    case pkm::Format::kNone: break;
+  }
+  return msv::Game::kSV;
+}
+
+// Jogo gen3 aberto -> tabela de learnset e codigo de origem (1=Sapphire
+// 2=Ruby 3=Emerald 4=FireRed 5=LeafGreen). O SaveSource reporta kFireRed
+// para todo gen3 hoje; os demais ficam mapeados para quando ele distinguir.
+lsn::Game LearnsetOfGen3(cp::Game g) {
+  switch (g) {
+    case cp::Game::kRubySapphire: return lsn::Game::kRubySapphire;
+    case cp::Game::kEmerald: return lsn::Game::kEmerald;
+    case cp::Game::kLeafGreen: return lsn::Game::kLeafGreen;
+    default: return lsn::Game::kFireRed;
+  }
+}
+
+std::uint8_t Gen3OriginCode(cp::Game g) {
+  switch (g) {
+    case cp::Game::kRubySapphire: return 2;
+    case cp::Game::kEmerald: return 3;
+    case cp::Game::kLeafGreen: return 5;
+    default: return 4;  // FireRed
+  }
+}
+
+// Portao de formato entre fontes (specs 086/106/111). Por que ESTE Pokemon
+// nao pode entrar NESTE destino? Vazio = pode.
 //
-// O NestBox guarda qualquer formato desde a spec 106 (o arquivo v5 ja sabia,
-// spec 090). O que continua bloqueado e o que exigiria CONVERSAO: gen3 para
-// save de Switch ("para cima"), moderno para save de GBA ("para baixo") e
-// formatos pkm diferentes entre saves modernos — `SaveData::Set` grava o
-// payload como veio, e um pa8 num slot pk9 corromperia o save.
+// Desde a spec 111 o portao e um DRY-RUN da conversao (sem memoria — gesto
+// cancelavel nao deixa rastro): o que converte passa, o que nao converte e
+// recusado aqui, na hora do gesto, com o motivo. A conversao de verdade
+// acontece no commit.
 std::string FormatBlockReason(const g3::BoxPokemon& mon, BoxSource* dst) {
   if (mon.empty() || !dst) return "";
   const bool is_modern = mon.modern != nullptr;
+  // Fonte sem payload (fallback Z-A somente leitura): o registro nao carrega
+  // nem `modern` nem os 80 bytes gen3 — nao ha o que guardar ou converter.
+  if (!is_modern && mon.raw[0] == 0 && mon.raw[1] == 0 && mon.raw[2] == 0 &&
+      mon.raw[3] == 0) {
+    return "Este save abriu em modo somente leitura.\n"
+           "O Pokemon nao pode sair dele.";
+  }
   if (dynamic_cast<NestBoxSource*>(dst)) return "";
   if (auto* m = dynamic_cast<ModernSaveSource*>(dst)) {
     if (!is_modern) {
-      return "Transferir Pokemon de GBA para um save de Switch ainda nao e "
-             "suportado.";
+      // Subida gen3 -> Switch (spec 109).
+      if (!g3x::ConvertUp(mon.raw, m->PkmFormat(),
+                          MsGameOfSave(m->GameEnum()), nullptr)) {
+        return "Este Pokemon nao pode subir para um jogo de Switch.\n"
+               "Ovo e bad egg nao transferem.";
+      }
+      return "";
     }
-    if (mon.modern->format != m->PkmFormat()) {
-      return "Transferir entre jogos de Switch com formatos diferentes ainda "
-             "nao e suportado.";
+    if (mon.modern->format != m->PkmFormat() &&
+        !pkm::Convert(*mon.modern, m->PkmFormat())) {
+      return "Este Pokemon nao e representavel neste jogo.";
     }
     return "";
   }
-  // Destino gen3 (ou fonte somente leitura): moderno nao desce sem conversao.
-  if (is_modern) {
-    return "Transferir Pokemon de Switch para um save de GBA nao e suportado.";
+  if (auto* s = dynamic_cast<SaveSource*>(dst)) {
+    if (is_modern) {
+      // Descida Switch -> gen3 (spec 110).
+      std::uint8_t tmp[80];
+      if (!g3x::ConvertDown(*mon.modern, LearnsetOfGen3(s->GameId()),
+                            MsGameOfPkm(*mon.modern), nullptr,
+                            Gen3OriginCode(s->GameId()), tmp)) {
+        return "Este Pokemon nao pode descer para um jogo de GBA.\n"
+               "Especies novas e formas regionais nao existem la.";
+      }
+    }
+    return "";
   }
   return "";
 }
@@ -7062,18 +7143,55 @@ class BoxActivity : public brls::Activity {
                save_changes.size());
       return false;
     }
-    // Backstop do portao de formato: um Pokemon moderno jamais pode chegar ao
-    // WriteChanges gen3 — ele gravaria `raw` zerado por cima do slot. O drop
-    // ja recusa (spec 106); se algum caminho novo furar, o commit para AQUI,
-    // com tudo intacto.
+    // Conversao entre geracoes no COMMIT (spec 111). O dry-run do drop ja
+    // aprovou cada gesto; aqui a conversao roda de verdade, com a memoria de
+    // moveset do banco — que sera gravada logo abaixo, no mesmo ciclo. Uma
+    // falha aqui aborta com TUDO intacto (nada foi escrito ainda).
+    if (modern) {
+      const msv::Game dest_ms = MsGameOfSave(modern->GameEnum());
+      for (vw::BoxChange& ch : modern_changes) {
+        if (ch.mon.empty()) continue;
+        if (!ch.mon.modern) {
+          // Subida gen3 -> Switch: o snapshot gen3 entra na memoria e o
+          // moveset vira o do jogo (ou o memorizado de la, G11).
+          auto up = g3x::ConvertUp(ch.mon.raw, modern->PkmFormat(), dest_ms,
+                                   &nest->movesets());
+          if (!up) {
+            NLOG_ACT("FALHA salvar: ConvertUp recusou (caixa %zu slot %zu) — "
+                     "nada foi gravado",
+                     ch.box, ch.slot);
+            return false;
+          }
+          ch.mon.modern = std::make_shared<const pkm::Pokemon>(std::move(*up));
+        } else if (ch.mon.modern->format != modern->PkmFormat()) {
+          auto conv = pkm::Convert(*ch.mon.modern, modern->PkmFormat());
+          if (!conv) {
+            NLOG_ACT("FALHA salvar: Convert entre formatos recusou (caixa %zu "
+                     "slot %zu) — nada foi gravado",
+                     ch.box, ch.slot);
+            return false;
+          }
+          ch.mon.modern =
+              std::make_shared<const pkm::Pokemon>(std::move(*conv));
+        }
+      }
+    }
     if (save) {
-      for (const auto& [idx, mon] : save_changes) {
-        if (!mon.empty() && mon.modern) {
-          NLOG_ACT("FALHA salvar: Pokemon moderno enderecado a save gen3"
-                   "(indice %zu) — nada foi gravado",
+      for (auto& [idx, mon] : save_changes) {
+        if (mon.empty() || !mon.modern) continue;
+        // Descida Switch -> gen3: o moveset moderno fica memorizado e o raw
+        // gen3 e construido (com o gen3 original restaurado, se houver).
+        std::uint8_t raw[80];
+        if (!g3x::ConvertDown(*mon.modern, LearnsetOfGen3(save->GameId()),
+                              MsGameOfPkm(*mon.modern), &nest->movesets(),
+                              Gen3OriginCode(save->GameId()), raw)) {
+          NLOG_ACT("FALHA salvar: ConvertDown recusou (indice %zu) — nada "
+                   "foi gravado",
                    idx);
           return false;
         }
+        std::memcpy(mon.raw, raw, sizeof(mon.raw));
+        mon.modern.reset();
       }
     }
 
