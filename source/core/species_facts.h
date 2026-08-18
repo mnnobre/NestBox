@@ -17,6 +17,8 @@
 
 #include <cstdint>
 
+#include "gen9_base_stats.h"  // base stats para MaxHp (spec 119)
+
 namespace pokehome::species {
 
 inline constexpr std::uint16_t kMaxDex = 1025;
@@ -352,6 +354,20 @@ inline bool IsFusedForm(int dex, int form) {
     if (d == dex) return true;
   }
   return false;
+}
+
+// HP maximo pela formula padrao (spec 119). Um lugar so: a cauda de party do
+// save e o HP atual do nucleo precisam do MESMO numero, e duas copias da
+// formula divergiriam em silencio.
+//
+// Shedinja (base 1) tem HP 1 sempre. Dex invalida devolve 0.
+inline std::uint16_t MaxHp(int dex, std::uint8_t iv, std::uint8_t ev,
+                           std::uint8_t level) {
+  if (dex <= 0 || dex > 1025 || level == 0) return 0;
+  const std::uint8_t base = modern::kBaseStats[dex][0];
+  if (base == 1) return 1;
+  return static_cast<std::uint16_t>((2 * base + iv + ev / 4) * level / 100 +
+                                    level + 10);
 }
 
 }  // namespace pokehome::species

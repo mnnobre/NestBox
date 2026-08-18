@@ -56,6 +56,7 @@ enum Off : std::size_t {
   kOriginGame = 223,
   kLanguage = 227,
   kWeightAbsolute = 228,  // float — fora do modelo
+  kHpCurrent = 240,  // HP atual, no NUCLEO (spec 119)
   kStatus = 232,
 };
 
@@ -177,6 +178,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
 
   p.origin_game = d[kOriginGame];
   p.language = d[kLanguage];
+  p.hp_current = U16(d, kHpCurrent);
   p.status_condition = U32(d, kStatus);
 
   // Campos do modelo sem correspondente no PB7 (TD-02 da spec 057, ficam
@@ -270,6 +272,7 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
 
   d[kOriginGame] = p.origin_game;
   d[kLanguage] = p.language;
+  pkw::W16(d, kHpCurrent, p.hp_current);
   pkw::W32(d, kStatus, p.status_condition);
 
   // Nao escritos de proposito (o parser nao le): altura/peso absolutos

@@ -43,6 +43,7 @@ enum Off : std::size_t {
   kRelearn = 130,       // 4 x u16
   kIvsEggNick = 140,    // u32: 6x5 bits + egg + nicknamed
   kDynamax = 144,
+  kHpCurrent = 138,  // HP atual, no NUCLEO (spec 119)
   kStatus = 148,
   kPalma = 152,
   kHtName = 168,        // 26 bytes
@@ -185,6 +186,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.is_nicknamed = (iv32 >> 31) & 1;
 
   p.dynamax_level = d[kDynamax];
+  p.hp_current = U16(d, kHpCurrent);
   p.status_condition = U32(d, kStatus);
   p.palma = U32(d, kPalma);
 
@@ -299,6 +301,7 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   pkw::W32(d, kIvsEggNick, pkw::PackIvs(ivs, p.is_egg, p.is_nicknamed));
 
   d[kDynamax] = p.dynamax_level;
+  pkw::W16(d, kHpCurrent, p.hp_current);
   pkw::W32(d, kStatus, p.status_condition);
   pkw::W32(d, kPalma, p.palma);
 

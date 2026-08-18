@@ -268,10 +268,16 @@ int main() {
             static_cast<std::uint16_t>(dec[332] | (dec[333] << 8));
         const std::uint16_t fim =
             static_cast<std::uint16_t>(dec[342] | (dec[343] << 8));
+        // HP ATUAL mora no NUCLEO, em 0x8A (spec 119) — nao na cauda.
+        const std::uint16_t hp_cur =
+            static_cast<std::uint16_t>(dec[0x8A] | (dec[0x8B] << 8));
         Check(level == 46, "nivel na cauda de party");
         Check(hp_max > 50 && hp_max < 250, "HP maximo plausivel em 330");
         Check(atk != 0 && atk < hp_max, "Atk em 332 (layout Z-A, nao o do SV)");
         Check(fim == 0, "bytes finais zerados como nos nativos");
+        Check(hp_cur == hp_max,
+              "HP ATUAL em 0x8A igual ao maximo — chega VIVO (spec 119)");
+        Check(dec[0x90] == 0 && dec[0x91] == 0, "status zerado (sem dorme/queima)");
       }
     }
   }

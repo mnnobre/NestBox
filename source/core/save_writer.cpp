@@ -146,8 +146,9 @@ void FillPartyTail16(std::uint8_t* tail, const pkm::Pokemon& mon, Game g) {
   for (int i = 0; i < 6; ++i) {
     const int core = (2 * base[i] + mon.ivs[i] + mon.evs[i] / 4) * level / 100;
     if (i == 0) {
-      // Shedinja: HP base 1 e HP final sempre 1.
-      stats[0] = base[0] == 1 ? 1 : static_cast<std::uint16_t>(core + level + 10);
+      // Mesma funcao que o conversor usa para o HP atual (spec 119): duas
+      // copias da formula divergiriam em silencio.
+      stats[0] = pokehome::species::MaxHp(dex, mon.ivs[0], mon.evs[0], level);
     } else {
       int v = core + 5;
       if (up != down) {

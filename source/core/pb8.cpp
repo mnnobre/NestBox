@@ -53,6 +53,7 @@ enum Off : std::size_t {
   kPpUps = 126,         // 4 x u8
   kRelearn = 130,       // 4 x u16
   kIvsEggNick = 140,    // u32: 6x5 bits + egg + nicknamed
+  kHpCurrent = 138,  // HP atual, no NUCLEO (spec 119)
   kStatus = 148,
   kHtName = 168,        // 26 bytes
   kHtGender = 194,
@@ -188,6 +189,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.is_egg = (iv32 >> 30) & 1;
   p.is_nicknamed = (iv32 >> 31) & 1;
 
+  p.hp_current = U16(d, kHpCurrent);
   p.status_condition = U32(d, kStatus);
 
   p.ht_name = Utf16ToUtf8(d, kHtName);
@@ -296,6 +298,7 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
                                p.ivs[3], p.ivs[4], p.ivs[5]};
   pkw::W32(d, kIvsEggNick, pkw::PackIvs(ivs, p.is_egg, p.is_nicknamed));
 
+  pkw::W16(d, kHpCurrent, p.hp_current);
   pkw::W32(d, kStatus, p.status_condition);
 
   pkw::WriteUtf16(d, kHtName, p.ht_name, 13);

@@ -94,6 +94,23 @@ struct Pokemon {
   std::uint8_t fullness = 0;      // [extra] camping/curry
   std::uint8_t enjoyment = 0;     // [extra]
   std::uint32_t status_condition = 0;  // [extra] dorme/queimado ao guardar
+  // HP ATUAL. Mora no NUCLEO (0x8A no pk8/pb8/pk9, 0x92 no pa8, 0xF0 no
+  // pb7) — NAO na cauda de party, apesar de ser estado de batalha. Medido
+  // pela sonda tools/pkhex-za2 contra o PkHeX (spec 119): sem preencher, o
+  // Pokemon depositado aparece com 0 de vida (morto) no jogo.
+  std::uint16_t hp_current = 0;        // [extra]
+
+  // Golpes cujo bit de "plus flag" do Legends Z-A deve estar ligado (spec
+  // 120). O bitmap mora no binario do PK9 e o app so LIGA bits — modelar os
+  // ~99 bytes seria carregar estado que ninguem le. O writer do pk9 aplica
+  // esta lista sobre o buffer; o resto do bloco vem do `raw` (escrita
+  // conservadora da spec 063).
+  //
+  // NOTA da sonda (spec 120): um nativo LEGAL do Z-A tem ZERO plus flags, e
+  // ligar a flag NAO torna legal um golpe fora do learnset da especie. O
+  // campo existe porque o PkHeX cobra a flag para golpes que o Pokemon
+  // legitimamente conhece; nao e a causa do "Invalid Move".
+  std::vector<std::uint16_t> za_plus_moves;  // [extra]
   std::uint32_t palma = 0;        // [extra] PK8
   std::uint32_t form_argument = 0;     // [extra] Furfrou/Yamask/etc
   // Flags de TR/TM aprendidos (tamanho varia por formato: 14 no PK8).

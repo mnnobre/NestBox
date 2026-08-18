@@ -146,6 +146,17 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
                          : 0;
   }
 
+  // HP ATUAL cheio (spec 119). Mora no NUCLEO do formato, nao na cauda de
+  // party: sem isto o Pokemon aparece com 0 de vida no jogo — foi o que o
+  // dono viu no Z-A. O HP maximo sai da mesma formula do save_writer.
+  p.hp_current = species::MaxHp(dex, p.ivs[0], p.evs[0], level);
+  p.status_condition = 0;
+
+  // Nivel de obediencia acompanha o nivel (spec 120): nos nativos do Z-A os
+  // dois sao iguais, e o verify acusa "Invalid Obedience Level" quando fica
+  // zerado. Vale para todo destino pk9 (SV usa o mesmo campo).
+  if (destino == pkm::Format::kPK9) p.obedience_level = level;
+
   return p;
 }
 

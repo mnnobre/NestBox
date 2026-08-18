@@ -58,6 +58,7 @@ enum Off : std::size_t {
   kPpUps = 134,            // [pkhex] 4 x u8
   kRelearn = 138,          // [pkhex] 4 x u16
   kIvsEggNick = 148,       // [ok] u32: 6x5 bits + egg + nicknamed
+  kHpCurrent = 146,  // HP atual, no NUCLEO (spec 119)
   kStatus = 156,           // [ok] u32
   // CORRIGIDO na 066: alpha/noble NAO ficam em 156/157. Sao os bits 5 e 6 do
   // byte 22 (o mesmo do ability number). O byte 156 so parecia certo porque,
@@ -194,6 +195,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.is_egg = (iv32 >> 30) & 1;
   p.is_nicknamed = (iv32 >> 31) & 1;
 
+  p.hp_current = U16(d, kHpCurrent);
   p.status_condition = U32(d, kStatus);
 
   // Especificos de PLA. Alpha e noble sao bits do byte 22 (spec 066), nao
@@ -312,6 +314,7 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   // A briga entre status_condition e is_alpha que a spec 060 registrou nao
   // existe: os dois nunca dividiram byte. O alpha/noble vao no byte 22 (junto
   // do ability number, acima) e 156 e so o status. Spec 066.
+  pkw::W16(d, kHpCurrent, p.hp_current);
   pkw::W32(d, kStatus, p.status_condition);
   for (int i = 0; i < 6; ++i) d[kEffortLevels + i] = p.effort_levels[i];
   pkw::W16(d, kAlphaMove, p.alpha_move);

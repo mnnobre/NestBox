@@ -41,6 +41,7 @@ enum Off : std::size_t {
   kPpUps = 126,
   kRelearn = 130,
   kIvsEggNick = 140,
+  kHpCurrent = 138,  // HP atual, no NUCLEO (spec 119)
   kStatus = 144,          // PK8: 148
   kTeraOriginal = 148,    // so PK9
   kTeraOverride = 149,    // so PK9
@@ -176,6 +177,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.is_egg = (iv32 >> 30) & 1;
   p.is_nicknamed = (iv32 >> 31) & 1;
 
+  p.hp_current = U16(d, kHpCurrent);
   p.status_condition = U32(d, kStatus);
   p.tera_type_original = d[kTeraOriginal];
   p.tera_type_override = d[kTeraOverride];
@@ -288,7 +290,19 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
                                p.ivs[3], p.ivs[4], p.ivs[5]};
   pkw::W32(d, kIvsEggNick, pkw::PackIvs(ivs, p.is_egg, p.is_nicknamed));
 
+  pkw::W16(d, kHpCurrent, p.hp_current);
   pkw::W32(d, kStatus, p.status_condition);
+
+  // Plus flags do Z-A (spec 120): LIGA o bit de cada golpe pedido. Dois
+  // blocos, medidos pela sonda tools/pkhex-za2 contra o PkHeX:
+  //   id  < 256 -> 0xD6 + id/8
+  //   id >= 256 -> 0x94 + (id-256)/8
+  // Bits ja ligados no buffer original nao sao apagados.
+  for (const std::uint16_t mv : p.za_plus_moves) {
+    if (mv == 0 || mv > 359) continue;
+    const std::size_t byte = mv < 256 ? 0xD6 + mv / 8 : 0x94 + (mv - 256) / 8;
+    d[byte] = static_cast<std::uint8_t>(d[byte] | (1u << (mv % 8)));
+  }
   d[kTeraOriginal] = p.tera_type_original;
   d[kTeraOverride] = p.tera_type_override;
 
