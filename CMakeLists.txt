@@ -4,7 +4,7 @@ project(pokehome C CXX)
 
 # Versao do app. Deve casar com a tag da release no GitHub — e o que o
 # auto-update compara. Ao publicar uma release nova, subir aqui tambem.
-set(NESTBOX_VERSION "0.9.4")
+set(NESTBOX_VERSION "0.9.5")
 # Repo publico so de releases — o codigo vive no repo privado mnnobre/NestBox.
 set(NESTBOX_REPO "mnnobre/NestBox")
 
@@ -182,6 +182,14 @@ add_test(NAME gen3 COMMAND test_gen3)
 add_executable(test_gen3_transfer tests/test_gen3_transfer.cpp)
 target_link_libraries(test_gen3_transfer PRIVATE pokehome_core)
 add_test(NAME gen3_transfer COMMAND test_gen3_transfer)
+
+# Matriz de validacao pre-PROD (spec 114): normal, nao-convencional e QA.
+add_executable(test_qa_matrix tests/test_qa_matrix.cpp)
+target_link_libraries(test_qa_matrix PRIVATE pokehome_core)
+target_compile_definitions(test_qa_matrix PRIVATE
+  CLEAN_SAVES="${CMAKE_CURRENT_SOURCE_DIR}/tests/saves-limpos/"
+  SIM_SAVES="${CMAKE_CURRENT_SOURCE_DIR}/build/switch-sim/saves/")
+add_test(NAME qa_matrix COMMAND test_qa_matrix)
 
 # Movimentacao entre caixas (spec 019). Header-only: linka o core so pelos
 # tipos de gen3_save.h.

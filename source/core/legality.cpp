@@ -176,7 +176,13 @@ void CheckDynamax(const pkm::Pokemon& p, LegalityResult& r) {
 // EC igual ao PID e assinatura de Pokemon montado do zero por um editor: o
 // jogo sorteia os dois de forma independente e a coincidencia teria chance
 // 1 em 2^32.
+//
+// EXCECAO por historia (spec 114, mesmo criterio do PkHeX): Pokemon com
+// ORIGEM ate a gen5 (codigos 1..23) ganharam EC na transferencia para cima,
+// e a regra la e EC = PID — o Bank/HOME fazem assim, e a nossa subida gen3
+// tambem. Para essas origens a igualdade e o esperado, nao a suspeita.
 void CheckEcPid(const pkm::Pokemon& p, LegalityResult& r) {
+  if (p.origin_game >= 1 && p.origin_game <= 23) return;
   if (p.encryption_constant == p.pid && p.pid != 0) {
     Add(r, "ec_pid",
         "A semente de cifra e o PID sao identicos, o que o jogo nao produz.");
@@ -303,6 +309,19 @@ LegalityResult CheckLegalityGen3(const std::uint8_t raw[80]) {
   // Bad egg: o proprio jogo ja condenou este registro (checksum quebrado em
   // algum momento). E o unico veredito que vem pronto do save.
   if (full->flags & 0x01) Add("bad_egg", "O jogo marcou este Pokemon como Bad Egg.");
+
+  // Checksum do registro (0x1C): o jogo confere e vira Bad Egg na hora. O
+  // Encode e o inverso exato do Decode (roundtrip da spec 108), entao os
+  // unicos bytes que podem divergir na reconstrucao sao os do checksum — se
+  // divergirem, o valor gravado estava errado (spec 114, Q3).
+  {
+    std::uint8_t rebuilt[80];
+    pokehome::gen3::EncodeFullRecord(*full, rebuilt);
+    if (raw[0x1C] != rebuilt[0x1C] || raw[0x1D] != rebuilt[0x1D]) {
+      Add("checksum", "O checksum do registro nao confere — o jogo mostraria "
+                      "um Bad Egg.");
+    }
+  }
 
   const int dex = pokehome::gen3::NationalDex(full->species);
   if (dex == 0) {
