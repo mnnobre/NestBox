@@ -404,6 +404,28 @@ void LoadSlots(SaveData& sd, const std::uint8_t* base, std::size_t stride,
   }
 }
 
+// UTF-16LE (BMP) -> UTF-8, parando no terminador. Para o nome do treinador
+// (spec 117).
+std::string ReadUtf16Name(const std::uint8_t* d, int max_chars) {
+  std::string out;
+  for (int i = 0; i < max_chars; ++i) {
+    const std::uint16_t cp =
+        static_cast<std::uint16_t>(d[i * 2] | (d[i * 2 + 1] << 8));
+    if (cp == 0) break;
+    if (cp < 0x80) {
+      out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+      out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+      out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+  }
+  return out;
+}
+
 std::optional<SaveData> LoadSc(const std::vector<std::uint8_t>& file, Game g) {
   const ScLayout L = LayoutOf(g);
   const auto blocks = swc::Decrypt(file);
@@ -418,6 +440,18 @@ std::optional<SaveData> LoadSc(const std::vector<std::uint8_t>& file, Game g) {
   sd.box_count = L.boxes;
   sd.slots_per_box = L.slots;
   LoadSlots(sd, b->data.data(), L.stride, L.record, L.boxes * L.slots);
+
+  // Nome do treinador (spec 117): bloco MyStatus, enderecos MEDIDOS nos
+  // saves reais (batem com as constantes do PkHeX).
+  const bool status8 = g == Game::kSwSh || g == Game::kPLA;
+  const std::uint32_t status_key = status8 ? 0xF25C070Eu : 0xE3E89BD1u;
+  const std::size_t name_off = g == Game::kSwSh ? 0xB0
+                               : g == Game::kPLA ? 0x20
+                                                 : 0x10;  // SV e Z-A
+  const swc::ScBlock* st = swc::Find(*blocks, status_key);
+  if (st && st->data.size() >= name_off + 26) {
+    sd.trainer_name = ReadUtf16Name(st->data.data() + name_off, 12);
+  }
   return sd;
 }
 
@@ -436,6 +470,13 @@ std::optional<SaveData> LoadFixed(const std::vector<std::uint8_t>& file, Game g)
   sd.box_count = boxes;
   sd.slots_per_box = slots;
   LoadSlots(sd, file.data() + base, stride, stride, boxes * slots);
+
+  // Nome do treinador (spec 117): offsets MEDIDOS (BDSP MyStatus 0x79BB4,
+  // LGPE 0x1038).
+  const std::size_t name_off = bdsp ? 0x79BB4 : 0x1038;
+  if (name_off + 26 <= file.size()) {
+    sd.trainer_name = ReadUtf16Name(file.data() + name_off, 12);
+  }
   return sd;
 }
 

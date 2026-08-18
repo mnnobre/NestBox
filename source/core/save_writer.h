@@ -50,6 +50,11 @@ struct SaveData {
   Game game{};
   std::vector<std::uint8_t> file;
 
+  // Nome do treinador DESTE save (spec 117), lido no Load — e o que permite
+  // marcar o handling trainer num deposito de Pokemon de outro OT. Vazio se
+  // o formato nao foi mapeado (nunca inventado).
+  std::string trainer_name;
+
   // Um slot de caixa. `present` distingue "slot vazio" de "Pokemon".
   struct Slot {
     bool present = false;

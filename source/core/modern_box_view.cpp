@@ -76,9 +76,25 @@ bool ApplyBoxChanges(savew::SaveData& sd,
     if (!c.mon.empty() && !c.mon.modern) return false;
   }
   for (const BoxChange& c : changes) {
-    const bool ok = c.mon.empty() ? sd.Set(c.box, c.slot, pkm::Pokemon{})
-                                  : sd.Set(c.box, c.slot, *c.mon.modern);
-    if (!ok) return false;  // inalcancavel apos a validacao; cinto e suspensorio
+    if (c.mon.empty()) {
+      if (!sd.Set(c.box, c.slot, pkm::Pokemon{})) return false;
+      continue;
+    }
+    pkm::Pokemon p = *c.mon.modern;
+    // Handling trainer (spec 117): num save cujo treinador nao e o OT do
+    // Pokemon, o handler atual tem de ser o HT — e o ultimo "Invalid" que o
+    // pkhex-verify apontava. So mexe quando o campo ainda aponta para o OT;
+    // um HT ja preenchido por outro jogo nao e sobrescrito.
+    if (!sd.trainer_name.empty() && p.ot_name != sd.trainer_name &&
+        p.current_handler == 0) {
+      p.current_handler = 1;
+      if (p.ht_name.empty()) {
+        p.ht_name = sd.trainer_name;
+        p.ht_friendship = 50;
+        p.ht_language = p.language;
+      }
+    }
+    if (!sd.Set(c.box, c.slot, p)) return false;
   }
   return true;
 }

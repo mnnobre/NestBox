@@ -276,6 +276,51 @@ int main() {
     }
   }
 
+  // --- 7. OT do save e handling trainer (spec 117) ----------------------
+  std::printf("OT do save e handler (spec 117):\n");
+  Check(sd->trainer_name == "Amaral", "trainer_name lido do MyStatus do Z-A");
+  {
+    pokehome::gen3::FullRecord g3rec;
+    g3rec.personality = 0x00010002;
+    g3rec.ot_id = 0x00010001;
+    pokehome::gen3::EncodeGen3String("PIKACHU", g3rec.nickname_raw,
+                                     sizeof(g3rec.nickname_raw));
+    g3rec.language = 2;
+    g3rec.flags = 0x02;
+    pokehome::gen3::EncodeGen3String("ASH", g3rec.ot_name_raw,
+                                     sizeof(g3rec.ot_name_raw));
+    g3rec.species = 25;
+    g3rec.experience = 100000;
+    g3rec.moves[0] = 85;
+    g3rec.origins = static_cast<std::uint16_t>(5 | (4u << 7) | (4u << 11));
+    std::uint8_t raw80[80];
+    pokehome::gen3::EncodeFullRecord(g3rec, raw80);
+    pokehome::moveset::Memory mem;
+    auto up = pokehome::g3x::ConvertUp(raw80, pkm::Format::kPK9,
+                                       pokehome::moveset::Game::kZA, &mem);
+    if (!up) {
+      Check(false, "conversao para o handler");
+    } else {
+      savew::SaveData sd3 = *sd;
+      g3::BoxPokemon ch;
+      ch.species = 25;
+      ch.modern = std::make_shared<const pkm::Pokemon>(*up);
+      Check(vw::ApplyBoxChanges(sd3, {{to_box, to_slot, ch}}),
+            "deposito com handler aplica");
+      const auto& gravado = sd3.At(to_box, to_slot).mon;
+      Check(gravado.current_handler == 1,
+            "handler atual e o HT (OT do mon != treinador do save)");
+      Check(gravado.ht_name == "Amaral", "HT recebe o treinador do save");
+      // Reabrir pelo arquivo confirma que os campos sobrevivem a escrita.
+      const auto out3 = savew::Save(sd3);
+      auto re3 = savew::Load(out3);
+      Check(re3.has_value() &&
+                re3->At(to_box, to_slot).mon.ht_name == "Amaral" &&
+                re3->At(to_box, to_slot).mon.current_handler == 1,
+            "handler e HT sobrevivem ao Save/Load");
+    }
+  }
+
   if (g_failures) {
     std::printf("%d falha(s)\n", g_failures);
     return 1;
