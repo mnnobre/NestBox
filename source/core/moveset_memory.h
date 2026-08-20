@@ -69,9 +69,40 @@ enum class Game : std::uint8_t {
 
 // O que se guarda de um moveset. Golpes e PP-ups; o PP corrente nao entra
 // porque e estado de batalha, nao configuracao (o jogo o restaura cheio).
+// O que ficou guardado de um Pokemon NAQUELE jogo. O moveset veio da spec
+// 071; o resto entrou na 139, fechando a L4 da pesquisa de mecanicas.
+//
+// A regra que estes campos implementam (DEC-1 do dono): a transferencia e
+// transversal, e "quando volta e restaurado caso fique limitado em algo". Um
+// tera type nao existe no SwSh — mas nao pode SUMIR por ter passado por la.
 struct Snapshot {
   std::array<std::uint16_t, 4> moves{};
   std::array<std::uint8_t, 4> pp_ups{};
+
+  // Mecanicas retidas por jogo (spec 139). Zero significa "nada guardado",
+  // que e o mesmo estado de uma entrada gravada por uma versao anterior do
+  // arquivo — por isso a migracao nao precisa de valor sentinela.
+  std::uint8_t tera_type = 0;       // SV
+  std::uint8_t dynamax_level = 0;   // SwSh
+  bool gmax = false;                // SwSh
+  bool alpha = false;               // PLA
+  std::array<std::uint8_t, 6> effort_levels{};  // GVs do PLA
+
+  // IDENTIDADE DE ORIGEM (spec 145). O SwSh nao representa origem em jogo
+  // posterior: ao entrar la, o Pokemon tem `origin_game` reescrito para SW/SH
+  // e o local trocado por um codigo 59996-60000. Sem guardar o original, a
+  // VOLTA nao tem como restaura-lo — um Charizard de Hisui viraria "veio do
+  // PLA" sem o local, para sempre.
+  //
+  // O HOME oficial faz isso com um registro mestre. O NestBox e o HOME: o
+  // dono decidiu (2026-08-20) reter o registro em vez de aceitar a perda.
+  //
+  // `origin_game == 0` significa "nada guardado" — o mesmo estado de uma
+  // entrada de versao anterior, entao a migracao nao precisa de sentinela.
+  std::uint8_t origin_game = 0;
+  std::uint16_t met_location = 0;
+  std::uint16_t egg_location = 0;
+  std::uint8_t ball = 0;
 };
 
 // Uma entrada da memoria: 24 bytes serializados (ver kEntryBytes).
@@ -81,7 +112,20 @@ struct Record {
   Snapshot snapshot;
 };
 
-inline constexpr std::size_t kEntryBytes = 24;
+// 24 na v1 (spec 071), 32 a partir da spec 139. A entrada cresceu para caber
+// as mecanicas retidas; os 3 bytes que a v1 deixou livres nao davam conta dos
+// 6 GVs do PLA sozinhos.
+//
+// `Decode` LE AS DUAS: uma secao gravada com entradas de 24 bytes continua
+// sendo lida, e os campos novos entram zerados — que e exatamente o que
+// significam ("este Pokemon nunca guardou nada disso"). Ver TD-01 da spec.
+// v3 (spec 145): 40 bytes. A identidade de origem sao 6 (origin_game,
+// met_location, egg_location, ball) e os 2 de padding da v2 nao davam. As
+// TRES sao lidas; os campos que a versao antiga nao tinha entram zerados, que
+// e exatamente o que significam.
+inline constexpr std::size_t kEntryBytes = 40;
+inline constexpr std::size_t kEntryBytesV2 = 32;
+inline constexpr std::size_t kEntryBytesV1 = 24;
 
 // A memoria inteira. Poucas dezenas de entradas na pratica; busca linear.
 // ponytail: busca linear por (tracker, jogo); indexar se o banco crescer.

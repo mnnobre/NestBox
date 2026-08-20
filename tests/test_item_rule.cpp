@@ -84,15 +84,18 @@ static const Caso kCasos[] = {
     // tem). O `ReadBag` devolve o que o jogador POSSUI. Os dois numeros sao
     // diferentes de proposito e a divergencia foi investigada, nao ajustada:
     //
-    //   SV    1113 linhas no dump, das quais 820 com count > 0.
-    //         (Medicine 25/27, Balls 23/28, BattleItems 9/9, Berries 48/53,
-    //          Items 188/257, TMHMs 171/230, Treasure 16/16,
-    //          Ingredients 142/166, KeyItems 17/67, Candy 181/260)
-    //         No SV o slot nao-possuido e marcado com Pouch = 0xFFFFFFFF.
-    {"SV", "0100A3D008C5C000/Amaral/main", savew::Game::kSV, 440, 820},
-    //   BDSP  457 linhas no dump e 457 com count > 0 — todo item listado e
-    //         possuido, entao aqui os dois numeros coincidem.
-    {"BDSP", "0100000011D90000/Amaral/SaveData.bin", savew::Game::kBDSP, 255, 457},
+    //   SV    save LEGITIMO do dono (capturado do console em 2026-08-19; o
+    //         anterior era editado, com 440 Pokemon e 820 itens). Inicio de
+    //         jogo: 15 itens com count > 0.
+    //         No SV o slot nao-possuido e marcado com Pouch = 0xFFFFFFFF —
+    //         a divergencia entre "linhas no dump" e "itens possuidos" foi
+    //         investigada na spec do item, nao ajustada.
+    {"SV", "0100A3D008C5C000/Amaral/main", savew::Game::kSV, 3, 15},
+    //   BDSP  save LEGITIMO do dono (capturado do console em 2026-08-18; o
+    //         anterior era de terceiro, com 457 itens e 255 Pokemon editados).
+    //         Inicio de jogo: 5 linhas no dump e 5 com count > 0
+    //         (KeyItems 2, Medicine 2, Balls 1), medido por tools/pkhex-bag.
+    {"BDSP", "0100000011D90000/Amaral/SaveData.bin", savew::Game::kBDSP, 3, 5},
 };
 
 static bool Denso(savew::Game g) {

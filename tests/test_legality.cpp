@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "body_size.h"
 #include "legality.h"
 #include "gen3_save.h"
 #include <cstring>
@@ -125,7 +126,11 @@ struct SaveReal {
 };
 
 static const SaveReal kReais[] = {
-    {"BDSP", "0100000011D90000/Amaral/SaveData.bin", savew::Game::kBDSP, 255, 255, 255},
+    // BDSP e PLA: saves LEGITIMOS do dono, capturados do console em
+    // 2026-08-18 (os anteriores eram de terceiro, com Pokemon editados —
+    // 255 ilegais no BDSP). Agora sao 3 Pokemon cada, 3/3 LEGAIS pelo
+    // oraculo, e entram como CONTROLE de falso positivo: o esperado e 0.
+    {"BDSP", "0100000011D90000/Amaral/SaveData.bin", savew::Game::kBDSP, 3, 0, 0},
     // LGPE: 90 e nao 92 DE PROPOSITO. Os dois que faltam (Eevee forma 1 e
     // Pikachu) divergem do calculado por ARREDONDAMENTO DE FLOAT — 31,55294
     // contra 31,552942 e 28,8 contra 28,800001. O PkHeX compara float por
@@ -134,12 +139,11 @@ static const SaveReal kReais[] = {
     // positivo. Diagnosticado na sondagem (spec 079, rodada 11).
     {"LGPE", "0100187003A36000/Amaral/savedata.bin", savew::Game::kLGPE, 92, 92, 90},
     {"Shield", "01008DB008C2C000/Amaral/main", savew::Game::kSwSh, 194, 194, 194},
-    {"Scarlet", "0100A3D008C5C000/Amaral/main", savew::Game::kSV, 440, 440, 439},
-    {"Sword", "0100ABF008968000/Amaral/main", savew::Game::kSwSh, 24, 0, 0},
+    {"Scarlet", "0100A3D008C5C000/Amaral/main", savew::Game::kSV, 3, 0, 0},
+    {"Sword", "0100ABF008968000/Amaral/main", savew::Game::kSwSh, 1, 0, 0},
     {"Z-A", "0100F43008C44000/Amaral/main", savew::Game::kZA, 96, 0, 0},
-    // PLA: o oraculo nao contou Pokemon neste save (0 mons na caixa). Entra
-    // como controle de que o formato PA8 nao gera falso positivo.
-    {"PLA", "01001F5010DFA000/Amaral/main", savew::Game::kPLA, 0, 0, 0},
+    // PLA: idem BDSP — 3 Pokemon legitimos, controle de falso positivo no PA8.
+    {"PLA", "01001F5010DFA000/Amaral/main", savew::Game::kPLA, 3, 0, 0},
 };
 
 static void TestDeteccao() {
@@ -453,7 +457,30 @@ static void TestContestOrigem() {
         "nativo moderno com pontos de concurso continua acusado");
 }
 
+// body::Absolutes precisa bater BIT A BIT com o PkHeX — 1 ULP de diferenca
+// e o "Calculated Weight does not match stored value" da spec 143. Os bits
+// esperados sairam de PA8/PB7.Get{Height,Weight}Absolute no PkHeX 25.12.21
+// (sonda tools/pkhex-peso). Se este teste quebrar, a causa provavel e o
+// compilador contraindo mul+add em FMA — ver o comentario em body_size.h.
+static void TestBodySizeBitExato() {
+  const auto bits = [](float f) {
+    std::uint32_t b;
+    std::memcpy(&b, &f, sizeof(b));
+    return b;
+  };
+  float h = 0, w = 0;
+  // Shinx (dex 403) no PLA: base 50/95, escalares 149/131 do save real.
+  pokehome::body::Absolutes(pokehome::body::kRatioPla, 50, 95, 149, 131, &h, &w);
+  Check(bits(h) == 0x424EBEBFu, "PA8 altura bit-exata com o PkHeX");
+  Check(bits(w) == 0x42C57C76u, "PA8 peso bit-exato com o PkHeX");
+  // Pikachu (dex 25) no LGPE: base 40/60, mesmos escalares.
+  pokehome::body::Absolutes(pokehome::body::kRatioLgpe, 40, 60, 149, 131, &h, &w);
+  Check(bits(h) == 0x422ACACBu, "PB7 altura bit-exata com o PkHeX");
+  Check(bits(w) == 0x4280CC22u, "PB7 peso bit-exato com o PkHeX");
+}
+
 int main() {
+  TestBodySizeBitExato();
   TestFalsoPositivo();
   TestDeteccao();
   TestSinteticos();

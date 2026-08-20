@@ -34,8 +34,8 @@
 #endif
 
 #include "device_saves.h"
+#include "ui_script.h"  // controle remoto da UI, modo --script (spec 134)
 #include "box_move.h"
-#include "box_sort.h"
 #include "dex_count.h"
 #include "game_moves.h"
 #include "game_species.h"
@@ -56,6 +56,8 @@
 #include "move_pp.h"      // PP base ao restaurar moveset (spec 125)
 #include "species_facts.h"  // LevelFromExp no deposito (spec 125)
 #include "gen3_transfer.h"  // conversao entre geracoes no gesto (spec 111)
+#include "commit_plan.h"    // decisao pura do commit (spec 128)
+#include "transfer_rules.h"  // as regras do HOME chegam ao gesto (spec 140)
 #include "nlog.h"
 #include "save_writer.h"
 #include "updater.h"
@@ -68,8 +70,10 @@ namespace bk = pokehome::backup;
 namespace cp = pokehome::compat;
 namespace vw = pokehome::view;
 namespace msv = pokehome::moveset;
+namespace cmt = pokehome::commit;  // decisao pura do commit (spec 128)
 namespace lsn = pokehome::learnset;
 namespace g3x = pokehome::g3x;
+namespace rules = pokehome::rules;  // portao unico da transferencia (spec 140)
 
 namespace {
 
@@ -863,9 +867,57 @@ void OpenLog() {
 // chamada no handler do B deixaria escapar.
 struct LogScreen {
   const char* name;
-  explicit LogScreen(const char* n) : name(n) { NLOG_NAV("-> ENTROU %s", name); }
-  ~LogScreen() { NLOG_NAV("<- SAIU %s", name); }
+  explicit LogScreen(const char* n) : name(n) {
+    NLOG_NAV("-> ENTROU %s", name);
+#ifndef __SWITCH__
+    // Controle remoto (spec 134): toda tela ja se identifica aqui, entao e
+    // aqui que ela passa a responder `assert activity <nome>` — sem repetir
+    // o registro em 13 Activities. Quem tem estado rico (a BoxActivity)
+    // sobrescreve o provedor depois; este e o piso.
+    nestbox::script::SetStateProvider(name, nullptr);
+#endif
+  }
+  ~LogScreen() {
+    NLOG_NAV("<- SAIU %s", name);
+#ifndef __SWITCH__
+    nestbox::script::ClearStateProvider(name);
+#endif
+  }
 };
+
+#ifndef __SWITCH__
+// Rotulo do botao sob o foco na caixa de mensagem aberta (spec 134). Global
+// porque o PillButton nao conhece a Activity que o hospeda; escrito pelo
+// onFocusGained, lido pelo dump da MessageBoxActivity.
+std::string g_script_focused_button;
+#endif
+
+#ifndef __SWITCH__
+// Geometria de um controle, para o dump do controle remoto (spec 133).
+//
+// O roteiro precisa MIRAR o toque: sem o retangulo real da View ele s'o
+// poderia chutar coordenadas, e um chute que erra por 2px reprova um
+// controle que funciona. Sai o centro (onde tocar) e o retangulo (para o
+// inventario conferir tamanho e posicao).
+//
+// Le getFrame() — a mesma geometria que o borealis usa para o hit-test do
+// dedo real, entao o que o dump promete e o que o toque encontra.
+std::string ScriptRect(const char* name, brls::View* v) {
+  if (!v) return "";
+  const brls::Rect f = v->getFrame();
+  const bool shown = v->getVisibility() == brls::Visibility::VISIBLE;
+  std::string out = "\"" + std::string(name) + "\":{";
+  out += "\"x\":" + std::to_string(static_cast<int>(f.getMinX()));
+  out += ",\"y\":" + std::to_string(static_cast<int>(f.getMinY()));
+  out += ",\"w\":" + std::to_string(static_cast<int>(f.getWidth()));
+  out += ",\"h\":" + std::to_string(static_cast<int>(f.getHeight()));
+  // Centro: e o ponto que um `tap` do roteiro usa.
+  out += ",\"cx\":" + std::to_string(static_cast<int>(f.getMidX()));
+  out += ",\"cy\":" + std::to_string(static_cast<int>(f.getMidY()));
+  out += ",\"visible\":" + std::string(shown ? "true" : "false");
+  return out + "}";
+}
+#endif
 
 // --- Confirmacoes ----------------------------------------------------------
 
@@ -898,7 +950,7 @@ void ShowContextMenu(
     brls::Rect anchor,
     std::vector<std::pair<std::string, std::function<void()>>> items);
 
-// Check Summary do HOME (spec 103). Declarada aqui porque a ListActivity e a
+// Check Summary do HOME (spec 103). Declarada aqui porque a (ex-)ListActivity e a
 // BoxActivity a abrem e vem antes no arquivo. `source` nulo desliga a
 // navegacao L/R (tela aberta de uma lista, sem caixa em volta).
 class BoxSource;
@@ -1228,6 +1280,8 @@ class ModernSaveSource : public BoxSource {
   // O formato pkm que ESTE save armazena (portao do saque, TD-02 da spec 106).
   pkm::Format PkmFormat() const { return vw::FormatOfGame(save_.game); }
   savew::Game GameEnum() const { return save_.game; }
+  // Treinador do save: vira o HT de quem chega de outro jogo (spec 143).
+  const std::string& TrainerName() const { return save_.trainer_name; }
 
   // Para o backup obrigatorio do commit: os bytes ORIGINAIS do arquivo e um
   // nome de arquivo valido para o .bak.
@@ -1520,6 +1574,33 @@ std::uint8_t Gen3OriginCode(cp::Game g) {
   }
 }
 
+// As especies que JA estao no save de destino, para o `SaveContext` das
+// regras (spec 140). A unica regra que le o destino e a do BDSP ("so 1
+// Lendario/Mitico de cada por save") — ver o TD-01 da spec 070.
+//
+// Varre as caixas do destino a cada gesto. Aceito (TD-02 da spec 140): isto
+// so roda no GESTO, nunca no `Refresh()` que desenha, e o maior save moderno
+// tem 32x30 slots.
+rules::SaveContext DestContext(BoxSource* dst) {
+  rules::SaveContext ctx;
+  if (!dst) return ctx;
+  for (std::size_t b = 0; b < dst->BoxCount(); ++b) {
+    for (std::size_t s = 0; s < kSlotsPerBox; ++s) {
+      const g3::BoxPokemon m = dst->At(b, s);
+      if (m.empty()) continue;
+      // A regra do BDSP compara contra `p.species` do pkm moderno, que e o
+      // indice INTERNO. Para o slot moderno lemos o mesmo campo; para o gen3
+      // o interno e o proprio `species` do registro.
+      ctx.species_present.push_back(m.modern ? m.modern->species : m.species);
+    }
+  }
+  // `level` fica em 0 de proposito (TD-01 da spec 140): 0 significa "derive
+  // da exp pela curva da especie", que e a fonte que o proprio core prefere
+  // desde a spec 076. Passar o `display_level` da tela criaria uma segunda
+  // verdade sobre o nivel.
+  return ctx;
+}
+
 // Portao de formato entre fontes (specs 086/106/111). Por que ESTE Pokemon
 // nao pode entrar NESTE destino? Vazio = pode.
 //
@@ -1527,6 +1608,18 @@ std::uint8_t Gen3OriginCode(cp::Game g) {
 // cancelavel nao deixa rastro): o que converte passa, o que nao converte e
 // recusado aqui, na hora do gesto, com o motivo. A conversao de verdade
 // acontece no commit.
+//
+// Desde a spec 140 ele NAO e mais o unico portao da tela: aprovado o formato,
+// as REGRAS de transferencia (`rules::CanTransfer`) tem a ultima palavra. Ate
+// aqui elas viviam so em `source/core/transfer.cpp`, incluido apenas por
+// testes — um Alolan Vulpix entrava num save de BDSP pela tela porque o gesto
+// nunca as consultava (achado no fim do evidence-log da spec 137).
+//
+// Os dois COEXISTEM, e nao se substituem:
+//   * o formato cobre o que a regra nao ve — save somente leitura, ovo e bad
+//     egg que nao sobem, especie que nao cabe no formato de destino;
+//   * a regra cobre o que o formato nao ve — forma regional, Gmax, Nincada,
+//     lendario unico do BDSP, Hyper Training.
 std::string FormatBlockReason(const g3::BoxPokemon& mon, BoxSource* dst) {
   if (mon.empty() || !dst) return "";
   const bool is_modern = mon.modern != nullptr;
@@ -1537,24 +1630,41 @@ std::string FormatBlockReason(const g3::BoxPokemon& mon, BoxSource* dst) {
     return "Este save abriu em modo somente leitura.\n"
            "O Pokemon nao pode sair dele.";
   }
+
+  // O NestBox e o HOME: guarda tudo e so restringe na DESCIDA para um jogo.
+  // `GameId()` dele e kCount, entao nem as regras teriam o que dizer.
   if (dynamic_cast<NestBoxSource*>(dst)) return "";
+
+  // O pkm que as regras vao julgar. E o Pokemon COMO ELE FICARA no destino —
+  // nao o de origem —, porque e disso que a regra fala ("este pode entrar
+  // neste jogo?"). Quem produz esse pkm e a MESMA conversao do dry-run logo
+  // abaixo; nenhuma conversao nova foi inventada aqui (escopo da spec 140).
+  pkm::Pokemon judged;
+  bool has_judged = false;
+
   if (auto* m = dynamic_cast<ModernSaveSource*>(dst)) {
     if (!is_modern) {
       // Subida gen3 -> Switch (spec 109).
-      if (!g3x::ConvertUp(mon.raw, m->PkmFormat(),
-                          MsGameOfSave(m->GameEnum()), nullptr)) {
+      const auto up = g3x::ConvertUp(mon.raw, m->PkmFormat(),
+                                     MsGameOfSave(m->GameEnum()), nullptr);
+      if (!up) {
         return "Este Pokemon nao pode subir para um jogo de Switch.\n"
                "Ovo e bad egg nao transferem.";
       }
-      return "";
+      // Gen3 puro nao tem `.modern`: ele so vira julgavel DEPOIS de
+      // convertido. E por isso que a regra roda aqui, e nao antes do portao
+      // de formato.
+      judged = *up;
+      has_judged = true;
+    } else {
+      judged = *mon.modern;
+      if (judged.format != m->PkmFormat() &&
+          !pkm::Convert(judged, m->PkmFormat())) {
+        return "Este Pokemon nao e representavel neste jogo.";
+      }
+      has_judged = true;
     }
-    if (mon.modern->format != m->PkmFormat() &&
-        !pkm::Convert(*mon.modern, m->PkmFormat())) {
-      return "Este Pokemon nao e representavel neste jogo.";
-    }
-    return "";
-  }
-  if (auto* s = dynamic_cast<SaveSource*>(dst)) {
+  } else if (auto* s = dynamic_cast<SaveSource*>(dst)) {
     if (is_modern) {
       // Descida Switch -> gen3 (spec 110).
       std::uint8_t tmp[80];
@@ -1564,8 +1674,31 @@ std::string FormatBlockReason(const g3::BoxPokemon& mon, BoxSource* dst) {
         return "Este Pokemon nao pode descer para um jogo de GBA.\n"
                "Especies novas e formas regionais nao existem la.";
       }
+      judged = *mon.modern;
+      has_judged = true;
+    } else {
+      // Gen3 -> gen3: dentro da mesma geracao nada converte, mas as regras
+      // gerais (especie existe no destino, ovo) continuam valendo. O pkm sai
+      // da mesma subida do dry-run, so que para o formato do proprio gen3
+      // nao ha alvo moderno — usamos o PK8 como veiculo NEUTRO: as regras
+      // que este caminho exerce (especie/forma/ovo) nao leem o formato.
+      const auto up = g3x::ConvertUp(mon.raw, pkm::Format::kPK8,
+                                     msv::Game::kSwSh, nullptr);
+      if (up) {
+        judged = *up;
+        has_judged = true;
+      }
     }
-    return "";
+  }
+
+  // As REGRAS, com a ultima palavra (spec 140).
+  if (has_judged) {
+    const rules::RuleResult r =
+        rules::CanTransfer(judged, dst->GameId(), DestContext(dst));
+    // `kWarning` NAO bloqueia (spec 038): golpe que o destino nao conhece e
+    // trocado pelo proprio jogo, e o rodape ja avisa disso em repouso
+    // (spec 131). Bloquear aqui reprovaria transferencia legal.
+    if (r.verdict == rules::Verdict::kBlocked) return r.reason;
   }
   return "";
 }
@@ -2320,8 +2453,40 @@ class SlotCell : public brls::Box {
     held_sprite_->setPositionLeft((kSlotW - kSpriteSize) / 2);
     addView(held_sprite_);
 
-    addGestureRecognizer(new brls::TapGestureRecognizer(this));
+    // Toque simples na celula (spec 133). O ctor `TapGestureRecognizer(this)`
+    // sozinho NAO basta: ele procura uma acao BUTTON_A registrada NA CELULA,
+    // e a do A mora no root da Activity — por isso o toque so movia o foco.
+    // O callback leva o foco (como o ctor simples faria) e depois dispara a
+    // MESMA acao do A, pela tela.
+    addGestureRecognizer(new brls::TapGestureRecognizer(
+        [this](brls::TapGestureStatus st, brls::Sound*) {
+          if (st.state != brls::GestureState::END) return;
+          brls::Application::giveFocus(this);
+          if (on_tap_) on_tap_(index_, st.position);
+        }));
+
+    // Arrastar (spec 133). O gesto NASCE sobre um slot, entao e a celula que
+    // o hospeda; a tela decide o que ele significa, porque o comportamento
+    // depende do modo ativo (mover / trocar / selecionar).
+    //
+    // PanAxis::ANY: a grade e bidimensional, e limitar a um eixo impediria a
+    // diagonal, que e o gesto natural para pegar um bloco.
+    addGestureRecognizer(new brls::PanGestureRecognizer(
+        [this](brls::PanGestureStatus status, brls::Sound*) {
+          if (on_pan_) on_pan_(index_, status);
+        },
+        brls::PanAxis::ANY));
   }
+
+  // Ligado pela tela: recebe (slot de origem, estado do gesto). A celula NAO
+  // interpreta o arrasto — ela so diz de onde ele partiu.
+  using PanCallback =
+      std::function<void(std::size_t, const brls::PanGestureStatus&)>;
+  void SetPanCallback(PanCallback cb) { on_pan_ = std::move(cb); }
+
+  // Toque simples: a tela dispara o que o A dispararia neste slot.
+  using TapCallback = std::function<void(std::size_t, brls::Point)>;
+  void SetTapCallback(TapCallback cb) { on_tap_ = std::move(cb); }
 
   // Textura dos icones do slot, cacheada por nome de arquivo. Sem cache,
   // `nvgCreateImage` dentro do draw() criaria uma textura por quadro, para
@@ -2663,6 +2828,8 @@ class SlotCell : public brls::Box {
 
   std::size_t index_;
   FocusCallback on_focus_;
+  PanCallback on_pan_;
+  TapCallback on_tap_;
   brls::Image* sprite_ = nullptr;
   brls::Image* origin_ = nullptr;
   brls::Image* held_sprite_ = nullptr;
@@ -3366,7 +3533,11 @@ const char* PanelArtSlug(const BoxSource* source, bool is_nest) {
 BoxPanel MakePanel(BoxSource* source, bool accent,
                    SlotCell::FocusCallback on_focus, int source_id = 0,
                    bx::MoveSession* session = nullptr,
-                   std::function<void()> on_spaces = nullptr) {
+                   std::function<void()> on_spaces = nullptr,
+                   // Toque nas setas do cabecalho (spec 133). Chamam a MESMA
+                   // rotina do L/R fisico — ver BoxActivity::StepBox.
+                   std::function<void()> on_prev_box = nullptr,
+                   std::function<void()> on_next_box = nullptr) {
   BoxPanel p;
   p.source = source;
   p.accent = accent;
@@ -3432,6 +3603,12 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   p.shoulder_l->setFontSize(28);
   p.shoulder_l->setTextColor(kWhite);
   leftGroup->addView(p.shoulder_l);
+  // Toque na seta (spec 133). No GRUPO, e nao no glifo: o alvo do dedo e o
+  // conjunto chevron + L, que e o que o usuario ve como um botao so.
+  if (on_prev_box) {
+    leftGroup->addGestureRecognizer(
+        new brls::TapGestureRecognizer(leftGroup, on_prev_box));
+  }
   header->addView(leftGroup);
 
   // Label nao aceita padding — a pilula e um Box em volta.
@@ -3469,6 +3646,10 @@ BoxPanel MakePanel(BoxSource* source, bool accent,
   right->setTextColor(kWhite);
   right->setMarginLeft(8);
   rightGroup->addView(right);
+  if (on_next_box) {
+    rightGroup->addGestureRecognizer(
+        new brls::TapGestureRecognizer(rightGroup, on_next_box));
+  }
   header->addView(rightGroup);
 
   p.root->addView(header);
@@ -3907,402 +4088,6 @@ class AppletWarningActivity : public brls::Activity {
   }
 };
 
-// --- Modo lista ------------------------------------------------------------
-
-constexpr int kListCols = 13;
-constexpr int kListRows = 6;
-constexpr int kListSize = kListCols * kListRows;  // 78 por tela
-
-// Celula compacta da lista: so o sprite, sem texto. O nome aparece no rodape.
-class ListCell : public brls::Box {
- public:
-  using FocusCallback = std::function<void(int)>;
-
-  ListCell(int offset, FocusCallback on_focus)
-      : brls::Box(brls::Axis::COLUMN),
-        offset_(offset),
-        on_focus_(std::move(on_focus)) {
-    setFocusable(true);
-    setGrow(1.0f);
-    setShrink(1.0f);
-    setMargins(3, 3, 3, 3);
-    setCornerRadius(8);
-    setJustifyContent(brls::JustifyContent::CENTER);
-    setAlignItems(brls::AlignItems::CENTER);
-    setBackgroundColor(nvgRGBA(255, 255, 255, 153));
-
-    sprite_ = new brls::Image();
-    sprite_->setDimensions(brls::View::AUTO, brls::View::AUTO);
-    sprite_->setWidthPercentage(74);
-    sprite_->setHeightPercentage(74);
-    sprite_->setScalingType(brls::ImageScalingType::STRETCH);
-    sprite_->setInterpolation(brls::ImageInterpolation::NEAREST);
-    addView(sprite_);
-
-    addGestureRecognizer(new brls::TapGestureRecognizer(this));
-  }
-
-  void onFocusGained() override {
-    brls::Box::onFocusGained();
-    if (on_focus_) on_focus_(offset_);
-  }
-
-  void Set(const g3::BoxPokemon& mon) {
-    const std::string path = mon.empty() ? "" : SpritePath(mon);
-    if (path.empty()) {
-      sprite_->setVisibility(brls::Visibility::GONE);
-      setBackgroundColor(nvgRGBA(255, 255, 255, 76));
-    } else {
-      sprite_->setImageFromFile(path);
-      sprite_->setVisibility(brls::Visibility::VISIBLE);
-      // Fundo dourado marca o shiny. Nao ha sprite shiny no romfs (seriam
-      // outras 386 imagens) — ver TD-02 da spec 025.
-      setBackgroundColor(mon.is_shiny() ? kShinyBg : nvgRGBA(255, 255, 255, 153));
-    }
-  }
-
- private:
-  int offset_;
-  FocusCallback on_focus_;
-  brls::Image* sprite_ = nullptr;
-};
-
-class ListActivity : public brls::Activity {
- public:
-  LogScreen log_screen_{"ListActivity"};
-
-  explicit ListActivity(BoxSource* source) : source_(source) {}
-
-  brls::View* createContentView() override {
-    auto* root = new GradientBackground();
-    root->setHeaderBand(58);
-    root->setAxis(brls::Axis::COLUMN);
-
-    root->addView(MakeTopBar());
-
-    // Grade + barra de posicao.
-    auto* body = new brls::Box(brls::Axis::ROW);
-    body->setGrow(1.0f);
-    body->setPadding(16, 40, 8, 40);
-
-    auto* grid = new brls::Box(brls::Axis::COLUMN);
-    grid->setGrow(1.0f);
-    grid->setShrink(1.0f);
-    for (int r = 0; r < kListRows; ++r) {
-      auto* row = new brls::Box(brls::Axis::ROW);
-      row->setGrow(1.0f);
-      row->setShrink(1.0f);
-      for (int c = 0; c < kListCols; ++c) {
-        auto* cell = new ListCell(r * kListCols + c,
-                                  [this](int off) { OnCellFocus(off); });
-        cells_.push_back(cell);
-        row->addView(cell);
-      }
-      grid->addView(row);
-    }
-    body->addView(grid);
-
-    // Barra de posicao: mostra onde a janela esta dentro dos 420 slots.
-    auto* track = new brls::Box(brls::Axis::COLUMN);
-    track->setWidth(12);
-    track->setCornerRadius(6);
-    track->setBackgroundColor(nvgRGBA(255, 255, 255, 153));
-    track->setMarginLeft(12);
-
-    thumbTop_ = new brls::Box(brls::Axis::COLUMN);
-    thumbTop_->setGrow(0.0f);
-    track->addView(thumbTop_);
-
-    auto* thumb = new brls::Box(brls::Axis::COLUMN);
-    thumb->setGrow(1.0f);
-    thumb->setCornerRadius(6);
-    thumb->setBackgroundColor(nvgRGB(0x9D, 0xBF, 0xA8));
-    track->addView(thumb);
-
-    thumbBottom_ = new brls::Box(brls::Axis::COLUMN);
-    thumbBottom_->setGrow(1.0f);
-    track->addView(thumbBottom_);
-
-    body->addView(track);
-    root->addView(body);
-
-    root->addView(MakeStatsBar());
-
-
-    root->registerAction(
-        "Voltar", brls::BUTTON_B,
-        [](brls::View*) {
-          brls::Application::popActivity();
-          return true;
-        },
-        false);
-    root->registerAction(
-        "Pagina anterior", brls::BUTTON_LB,
-        [this](brls::View*) { return Scroll(-kListSize); }, false);
-    root->registerAction(
-        "Proxima pagina", brls::BUTTON_RB,
-        [this](brls::View*) { return Scroll(kListSize); }, false);
-    // Y ordena e A abre detalhes — como no HOME (§5 e §10 da pesquisa). Antes
-    // Y era detalhes e A nao tinha uso nesta tela. Ver TD-02 da spec 024.
-    root->registerAction(
-        "Ordenar", brls::BUTTON_Y,
-        [this](brls::View*) {
-          sort_ = bx::NextSort(sort_);
-          Reorder();
-          top_ = 0;  // criterio novo, lista nova: volta ao topo
-          RefreshCells();
-          UpdateFooter();
-          return true;
-        },
-        false);
-    // − alterna o filtro de shiny (spec 025). Mesmo botao que a tela de caixas
-    // usa para o modo de selecao — em ambos os casos, "muda o modo da tela".
-    root->registerAction(
-        "So shiny", brls::BUTTON_BACK,
-        [this](brls::View*) {
-          filter_ = filter_ == bx::Filter::kNone ? bx::Filter::kShinyOnly
-                                                 : bx::Filter::kNone;
-          Reorder();
-          top_ = 0;
-          RefreshCells();
-          UpdateFooter();
-          return true;
-        },
-        false);
-    root->registerAction(
-        "Detalhes", brls::BUTTON_A,
-        [this](brls::View*) {
-          const g3::BoxPokemon mon = MonAt(top_ + focused_);
-          if (mon.empty()) return true;
-          // Check Summary (spec 103). Sem fonte de caixa: a lista atravessa
-          // caixas e o L/R do summary navega dentro de UMA caixa.
-          ShowSummary(mon, nullptr, 0, 0);
-          return true;
-        },
-        false);
-
-    RefreshCells();
-    if (!cells_.empty()) brls::Application::giveFocus(cells_[0]);
-    return root;
-  }
-
- private:
-  static constexpr int kTotalSlots =
-      static_cast<int>(g3::kBoxCount * g3::kSlotsPerBox);  // 420
-
-  brls::Box* MakeTopBar() {
-    auto* bar = new brls::Box(brls::Axis::ROW);
-    bar->setHeight(58);
-    bar->setAlignItems(brls::AlignItems::CENTER);
-    bar->setPadding(0, 40, 0, 40);
-    // Sem fundo proprio: a faixa diagonal do GradientBackground e o fundo
-    // desta barra. Um retangulo branco aqui cobriria a diagonal.
-
-    auto* title = new brls::Label();
-    title->setText("LISTA DE CRIATURAS");
-    title->setFontSize(28);
-    title->setTextColor(kTextPrimary);
-    bar->addView(title);
-
-    auto* spacer = new brls::Box(brls::Axis::ROW);
-    spacer->setGrow(1.0f);
-    bar->addView(spacer);
-
-    range_ = new brls::Label();
-    range_->setFontSize(22);
-    range_->setTextColor(kTextSecondary);
-    bar->addView(range_);
-
-    return bar;
-  }
-
-  brls::Box* MakeStatsBar() {
-    auto* bar = new brls::Box(brls::Axis::ROW);
-    bar->setHeight(105);
-    bar->setAlignItems(brls::AlignItems::CENTER);
-    bar->setPadding(0, 40, 0, 40);
-    // Translucida: sobre o fundo saturado um branco forte vira faixa leitosa.
-    bar->setBackgroundColor(nvgRGBA(255, 255, 255, 90));
-
-    // Largura maior e sem quebra: "Nv. 100 · Adamant · Caixa 1" nao cabia em
-    // 210px e o texto se sobrepunha aos stats.
-    auto* nameCol = new brls::Box(brls::Axis::COLUMN);
-    nameCol->setJustifyContent(brls::JustifyContent::CENTER);
-    nameCol->setWidth(300);
-    nameCol->setMarginRight(20);
-
-    statName_ = new brls::Label();
-    statName_->setFontSize(26);
-    statName_->setTextColor(kTextPrimary);
-    nameCol->addView(statName_);
-
-    statSub_ = new brls::Label();
-    statSub_->setFontSize(18);
-    statSub_->setTextColor(kTextSecondary);
-    nameCol->addView(statSub_);
-    bar->addView(nameCol);
-
-    // Seis colunas de IV, na ordem do save.
-    static const char* kNames[6] = {"HP", "ATQ", "DEF", "VEL", "ATQE", "DEFE"};
-    for (int i = 0; i < 6; ++i) {
-      auto* col = new brls::Box(brls::Axis::COLUMN);
-      col->setWidth(78);
-      col->setJustifyContent(brls::JustifyContent::CENTER);
-
-      auto* k = new brls::Label();
-      k->setText(kNames[i]);
-      k->setFontSize(16);
-      k->setTextColor(kTextTertiary);
-      col->addView(k);
-
-      statValues_[i] = new brls::Label();
-      statValues_[i]->setFontSize(24);
-      statValues_[i]->setTextColor(kTextPrimary);
-      col->addView(statValues_[i]);
-
-      bar->addView(col);
-    }
-
-    return bar;
-  }
-
-  // Slot cru, sem ordenacao. E o que a fonte tem naquela posicao fisica.
-  g3::BoxPokemon RawAt(int index) const {
-    if (index < 0 || index >= kTotalSlots) return {};
-    return source_->At(index / g3::kSlotsPerBox, index % g3::kSlotsPerBox);
-  }
-
-  // Quantos itens a lista mostra AGORA. Com filtro ativo e menor que
-  // kTotalSlots — paginacao, contador e barra de posicao seguem este numero,
-  // nao o total fisico (spec 025).
-  int VisibleCount() const {
-    if (filter_ == bx::Filter::kNone && order_.empty()) return kTotalSlots;
-    return static_cast<int>(order_.size());
-  }
-
-  // Pokemon na posicao `index` DA LISTA — passa pelo filtro e pela ordenacao
-  // ativos. Ambos sao so uma visao: a fonte nunca e alterada (TD-01 da 024).
-  g3::BoxPokemon MonAt(int index) const {
-    if (index < 0 || index >= VisibleCount()) return {};
-    if (order_.empty()) return RawAt(index);
-    return RawAt(static_cast<int>(order_[index]));
-  }
-
-  // Recalcula a ordem para o criterio ativo. Chamado ao trocar o criterio, nao
-  // a cada frame.
-  void Reorder() {
-    if (sort_ == bx::SortBy::kBox && filter_ == bx::Filter::kNone) {
-      order_.clear();  // vazio = ordem crua, sem custo de indirecao
-      return;
-    }
-    std::vector<bx::SortEntry> items;
-    items.reserve(kTotalSlots);
-    for (int i = 0; i < kTotalSlots; ++i) {
-      const g3::BoxPokemon mon = RawAt(i);
-      bx::SortEntry e;
-      e.index = static_cast<std::size_t>(i);
-      e.empty = mon.empty();
-      if (!e.empty) {
-        e.dex = mon.national_dex ? mon.national_dex : g3::NationalDex(mon.species);
-        e.level = g3::ComputeStats(mon).level;
-        e.name = DisplaySpecies(mon);
-        e.shiny = mon.is_shiny();
-      }
-      items.push_back(std::move(e));
-    }
-    order_ = bx::FilterAndSort(items, filter_, sort_);
-  }
-
-  bool Scroll(int delta) {
-    // max_top pode ser negativo quando o filtro deixa menos itens que uma
-    // tela: nesse caso nao ha o que rolar.
-    const int max_top = std::max(0, VisibleCount() - kListSize);
-    int top = top_ + delta;
-    if (top < 0) top = 0;
-    if (top > max_top) top = max_top;
-    if (top == top_) return true;
-    top_ = top;
-    RefreshCells();
-    UpdateFooter();
-    return true;
-  }
-
-  void RefreshCells() {
-    for (int i = 0; i < kListSize; ++i) cells_[i]->Set(MonAt(top_ + i));
-
-    // Contador e barra seguem o que esta VISIVEL: com filtro ativo a lista
-    // encolhe, e mostrar 420 mentiria sobre o quanto ha para percorrer.
-    const int total = VisibleCount();
-    const int first = total == 0 ? 0 : top_ + 1;
-    const int last = std::min(top_ + kListSize, total);
-    std::string txt = std::to_string(first) + "-" + std::to_string(last) +
-                      " / " + std::to_string(total);
-    if (filter_ != bx::Filter::kNone) {
-      txt += "  (" + std::string(bx::FilterName(filter_)) + ")";
-    }
-    range_->setText(txt);
-
-    // Posicao da barra: proporcional ao quanto ja foi rolado.
-    const int max_top = total - kListSize;
-    const float ratio = max_top > 0 ? static_cast<float>(top_) / max_top : 0.0f;
-    thumbTop_->setGrow(ratio * 4.0f);
-    thumbBottom_->setGrow((1.0f - ratio) * 4.0f);
-  }
-
-  void OnCellFocus(int offset) {
-    focused_ = offset;
-    UpdateFooter();
-  }
-
-  void UpdateFooter() {
-    const g3::BoxPokemon mon = MonAt(top_ + focused_);
-    if (mon.empty()) {
-      statName_->setText("—");
-      statSub_->setText("");
-      for (int i = 0; i < 6; ++i) statValues_[i]->setText("");
-      return;
-    }
-    const g3::BattleStats bs = g3::ComputeStats(mon);
-    statName_->setText(DisplaySpecies(mon));
-    // A caixa vem do slot REAL, nao da posicao na lista: com a lista ordenada
-    // os dois divergem, e mostrar a posicao ordenada seria mentir sobre onde o
-    // Pokemon esta guardado (TD-01 da spec 024).
-    const int slot = RealSlot(top_ + focused_);
-    std::string sub = "Nv. " + std::to_string(bs.level) + " · " +
-                      g3::NatureName(mon.nature()) + " · Caixa " +
-                      std::to_string(slot / static_cast<int>(g3::kSlotsPerBox) + 1);
-    if (sort_ != bx::SortBy::kBox) {
-      sub += "  ·  ordem: " + std::string(bx::SortName(sort_));
-    }
-    statSub_->setText(sub);
-    for (int i = 0; i < 6; ++i) {
-      statValues_[i]->setText(std::to_string(bs.values[i]));
-    }
-  }
-
-  // Slot fisico correspondente a uma posicao da lista. Sem ordenacao os dois
-  // coincidem.
-  int RealSlot(int index) const {
-    if (index < 0 || index >= kTotalSlots) return 0;
-    if (order_.empty()) return index;
-    return static_cast<int>(order_[index]);
-  }
-
-  BoxSource* source_;
-  std::vector<ListCell*> cells_;
-  int top_ = 0;
-  int focused_ = 0;
-  // Criterio de ordenacao e a visao resultante. `order_` vazio = ordem crua.
-  bx::SortBy sort_ = bx::SortBy::kBox;
-  bx::Filter filter_ = bx::Filter::kNone;
-  std::vector<std::size_t> order_;
-  brls::Label* range_ = nullptr;
-  brls::Label* statName_ = nullptr;
-  brls::Label* statSub_ = nullptr;
-  brls::Label* statValues_[6] = {};
-  brls::Box* thumbTop_ = nullptr;
-  brls::Box* thumbBottom_ = nullptr;
-};
 
 // --- Pokedex ---------------------------------------------------------------
 
@@ -4442,6 +4227,14 @@ class DexActivity : public brls::Activity {
   explicit DexActivity(BoxSource* save, BoxSource* nest = nullptr,
                        bx::MoveSession* session = nullptr)
       : tally_(kDexMax) {
+#ifndef __SWITCH__
+    // Controle remoto (spec 133).
+    nestbox::script::SetStateProvider("DexActivity", [this] {
+      std::string out = "\"rows\":" + std::to_string(rows_.size());
+      if (!rows_.empty()) out += "," + ScriptRect("row0", rows_[0]);
+      return out;
+    });
+#endif
     Scan(save, kSaveId, session, dx::kSave);
     if (nest) Scan(nest, kNestId, session, dx::kNest);
 
@@ -4820,7 +4613,14 @@ class RestoreActivity;
 // Barra de legenda do rodape (spec 050). Definida junto do FooterTab, que
 // depende da MessageBox — por isso so a declaracao aqui.
 brls::Box* MakeLegendBar(bool back = true, brls::Label** out_back = nullptr,
-                         const std::string& right_hint = "");
+                         const std::string& right_hint = "",
+                         // Devolve a dica da direita, para o dump do controle
+                         // remoto publicar a geometria dela (spec 133).
+                         brls::Label** out_hint = nullptr,
+                         // Toque na dica da direita (spec 133). O helper nao
+                         // sabe o que a dica anuncia — quem monta a tela liga
+                         // a MESMA acao do botao que ela nomeia.
+                         std::function<void()> on_right_hint = nullptr);
 
 // Desenha os Pokemon do bloco que caem FORA da grade (spec 088, rodada 9).
 //
@@ -5902,7 +5702,165 @@ class BoxActivity : public brls::Activity {
  public:
   LogScreen log_screen_{"BoxActivity"};
 
-  BoxActivity(BoxSource* nest, BoxSource* save) : nest_(nest), save_(save) {}
+  BoxActivity(BoxSource* nest, BoxSource* save) : nest_(nest), save_(save) {
+#ifndef __SWITCH__
+    // Controle remoto (spec 134): esta tela responde pelo proprio estado.
+    nestbox::script::SetStateProvider("BoxActivity",
+                                      [this] { return DumpState(); });
+#endif
+  }
+
+#ifndef __SWITCH__
+  ~BoxActivity() override {
+    nestbox::script::ClearStateProvider("BoxActivity");
+  }
+
+  // Estado da tela em JSON, para o `dump`/`assert` do roteiro (spec 134).
+  //
+  // Le os MESMOS membros que o Refresh() usa para desenhar — cursor_,
+  // activeLeft_, mode_, selPhase_ e os dois BoxPanel, com o conteudo passando
+  // por Effective() para os movimentos pendentes da sessao contarem. Ler
+  // estado derivado daqui daria falso-verde (TD-02 da spec).
+  std::string DumpState() const {
+    const BoxPanel& active = activeLeft_ ? left_ : right_;
+    std::string out;
+
+    out += "\"panel\":\"" + std::string(activeLeft_ ? "nest" : "save") + "\"";
+    out += ",\"cursor\":" + std::to_string(cursor_);
+    out += ",\"box\":" + std::to_string(active.box);
+    out += ",\"mode\":\"" + std::string(bx::CursorModeName(mode_)) + "\"";
+    out += ",\"overview\":" + std::string(active.overview ? "true" : "false");
+
+    const char* phase = "ocioso";
+    if (selPhase_ == SelPhase::kAncorando) phase = "ancorando";
+    else if (selPhase_ == SelPhase::kSegurando) phase = "segurando";
+    out += ",\"sel_phase\":\"" + std::string(phase) + "\"";
+
+    // Ha Pokemon na mao? E o que distingue "peguei" de "nao peguei" — o
+    // assert mais usado num roteiro de movimentacao.
+    out += ",\"held\":" + std::string(session_.Holding() ? "true" : "false");
+
+    // Rodape e caixa aberta, pelo texto que a tela mostra.
+    out += ",\"nest_box\":" + std::to_string(left_.box);
+    out += ",\"save_box\":" + std::to_string(right_.box);
+
+    // Conteudo do slot sob o cursor, em chave PLANA: o `assert` compara
+    // valores escalares e nao entra no array de `grids`. Este e o assert que
+    // prova que o Pokemon chegou onde deveria.
+    {
+      const g3::BoxPokemon at = active.Effective(cursor_);
+      out += ",\"slot_species\":\"" +
+             JsonEscape(at.empty() ? "" : DisplaySpecies(at)) + "\"";
+      out += ",\"slot_level\":" +
+             std::to_string(at.empty() ? 0 : g3::ComputeStats(at).level);
+    }
+    // Texto do rodape e marcacao do slot sob o cursor (spec 131): e o que
+    // permite afirmar que o aviso EM REPOUSO chegou, sem olhar a tela.
+    out += ",\"info\":\"" +
+           JsonEscape(statInfo_ ? statInfo_->getFullText() : "") + "\"";
+    {
+      const g3::BoxPokemon at = active.Effective(cursor_);
+      bool falta_especie = false, falta_golpe = false;
+      if (!at.empty() && active.ref_game != cp::Game::kCount) {
+        const int dex =
+            at.national_dex ? at.national_dex : g3::NationalDex(at.species);
+        falta_especie = !cp::HasSpecies(active.ref_game, dex);
+        falta_golpe = cp::MissingMoveIn(active.ref_game, at.moves,
+                                        sizeof(at.moves) / sizeof(at.moves[0])) != 0;
+      }
+      out += ",\"slot_sem_especie\":" +
+             std::string(falta_especie ? "true" : "false");
+      out += ",\"slot_sem_golpe\":" +
+             std::string(falta_golpe ? "true" : "false");
+    }
+
+    // Quantos Pokemon moram na caixa aberta de cada painel — a contagem que
+    // muda quando um deposito acontece.
+    out += ",\"nest_count\":" + std::to_string(left_.CountIn(left_.box));
+    out += ",\"save_count\":" + std::to_string(right_.CountIn(right_.box));
+
+    // Geometria dos slots, em coordenada de TELA (spec 133). E o que permite
+    // um roteiro tocar/arrastar um slot pelo centro em vez de chutar pixel.
+    // Sai do getFrame() da propria celula — a mesma caixa que o borealis usa
+    // no hit-test do toque, entao o que o roteiro toca e o que o dedo tocaria.
+    out += ",\"geom\":{";
+    out += "\"nest\":" + DumpGeom(left_);
+    out += ",\"save\":" + DumpGeom(right_);
+    out += "}";
+
+    // Geometria dos controles TOCAVEIS desta tela (spec 133), para o roteiro
+    // mirar o dedo em vez de chutar coordenada. Sai do getFrame(), a mesma
+    // que o borealis usa no hit-test.
+    {
+      const std::string l = ScriptRect("arrow_l", active.shoulder_l);
+      const std::string r = ScriptRect("arrow_r", active.shoulder_r);
+      if (!l.empty()) out += "," + l;
+      if (!r.empty()) out += "," + r;
+      // Faixa de modos: o roteiro toca uma COLUNA dela (centro +/- kModeCell).
+      const std::string ms = ScriptRect("mode_strip", modeStrip_);
+      if (!ms.empty()) out += "," + ms;
+      // Passo entre as pilulas, para o roteiro calcular a coluna sem
+      // recompilar a constante no proprio roteiro.
+      out += ",\"mode_cell\":" + std::to_string(static_cast<int>(kModeCell));
+      const std::string bk = ScriptRect("footer_back", backLabel_);
+      if (!bk.empty()) out += "," + bk;
+      const std::string ht = ScriptRect("footer_hint", hintLabel_);
+      if (!ht.empty()) out += "," + ht;
+    }
+
+    out += ",\"grids\":{";
+    out += "\"nest\":" + DumpGrid(left_);
+    out += ",\"save\":" + DumpGrid(right_);
+    out += "}";
+    return out;
+  }
+
+ private:
+  // Centro de cada celula da grade, em coordenada de tela (spec 133).
+  static std::string DumpGeom(const BoxPanel& p) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < p.cells.size(); ++i) {
+      if (i) out += ",";
+      const brls::Rect f = p.cells[i]->getFrame();
+      out += "{\"x\":" + std::to_string(static_cast<int>(f.getMidX())) +
+             ",\"y\":" + std::to_string(static_cast<int>(f.getMidY())) + "}";
+    }
+    return out + "]";
+  }
+
+  // Conteudo visivel de uma grade: um item por slot da caixa aberta. Passa
+  // por Effective(), como o Refresh() faz, para o overlay da sessao mandar.
+  static std::string DumpGrid(const BoxPanel& p) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < kSlotsPerBox; ++i) {
+      if (i) out += ",";
+      const g3::BoxPokemon mon = p.Effective(i);
+      if (mon.empty()) {
+        out += "null";
+        continue;
+      }
+      out += "{\"species\":\"" + JsonEscape(DisplaySpecies(mon)) + "\"";
+      out += ",\"level\":" + std::to_string(g3::ComputeStats(mon).level);
+      const std::string why = p.source->BlockedReason(p.box, i);
+      out += ",\"blocked\":" + std::string(why.empty() ? "false" : "true");
+      out += "}";
+    }
+    return out + "]";
+  }
+
+  // Escapa o que pode aparecer num apelido de Pokemon. Nao e um encoder de
+  // JSON completo: aspas e barra bastam para o dump nao quebrar.
+  static std::string JsonEscape(const std::string& in) {
+    std::string out;
+    for (char c : in) {
+      if (c == '"' || c == '\\') out += '\\';
+      out += c;
+    }
+    return out;
+  }
+
+ public:
+#endif  // __SWITCH__
 
   brls::View* createContentView() override {
     auto* root = new GradientBackground();
@@ -5936,7 +5894,12 @@ class BoxActivity : public brls::Activity {
           cursor_ = i;
           OnCursorMoved();
         },
-        kNestId, &session_, [this] { ToggleOverview(left_); });
+        kNestId, &session_, [this] { ToggleOverview(left_); },
+        // A seta pertence a ESTE painel: tocar a do painel inativo tem de
+        // trazer o foco antes de virar a caixa, senao o dedo mudaria a caixa
+        // do outro painel (StepBox age no ativo).
+        [this] { TouchStepBox(/*left=*/true, -1); },
+        [this] { TouchStepBox(/*left=*/true, +1); });
     right_ = MakePanel(
         save_, /*accent=*/false,
         [this](std::size_t i) {
@@ -5944,7 +5907,9 @@ class BoxActivity : public brls::Activity {
           cursor_ = i;
           OnCursorMoved();
         },
-        kSaveId, &session_, [this] { ToggleOverview(right_); });
+        kSaveId, &session_, [this] { ToggleOverview(right_); },
+        [this] { TouchStepBox(/*left=*/false, -1); },
+        [this] { TouchStepBox(/*left=*/false, +1); });
     // Os avisos em repouso comparam contra o jogo do SAVE ABERTO (spec 104),
     // nos DOIS paineis — e o que faz um Pokemon parado no NestBox avisar que
     // nao entra no save antes de o jogador tentar move-lo.
@@ -5971,8 +5936,12 @@ class BoxActivity : public brls::Activity {
     statsCard_ = MakeStatsBar();
     root->addView(statsCard_);
     // Legenda do rodape (spec 050): esta tela era a unica sem ela.
-    root->addView(MakeLegendBar(/*back=*/true, &backLabel_,
-                                std::string(kGlyphY) + "  Trocar"));
+    root->addView(MakeLegendBar(
+        /*back=*/true, &backLabel_, std::string(kGlyphY) + "  Trocar",
+        &hintLabel_,
+        // A dica anuncia o Y; tocar nela faz o Y. O membro e lido no momento
+        // do toque, quando RegisterActions ja o preencheu.
+        [this] { if (on_y_shortcut_) on_y_shortcut_(); }));
 
     // Cartao da visao geral (spec 105): overlay ABSOLUTE cobrindo a tela —
     // ele se desenha na regiao da barra de status, que some enquanto o
@@ -5999,6 +5968,191 @@ class BoxActivity : public brls::Activity {
  private:
   // Fora de linha: RestoreActivity so fica completa depois desta classe.
   void OpenRestore();
+
+  // Quanto o dedo precisa andar para o gesto contar como ARRASTO, e nao como
+  // um toque que tremeu. Metade da largura de um slot: abaixo disso o dedo
+  // nem saiu da celula onde encostou, entao a intencao era tocar.
+  static constexpr float kDragSlop = kSlotW / 2;
+
+  // Janela em que um Tap ainda conta como eco do arrasto que acabou. O eco
+  // chega no mesmo frame; 0.2s cobre com folga sem alcancar um toque que o
+  // usuario faria depois. O relogio e o de FRAMES do nlog — `armGetSystemTick`
+  // derruba o app no Ryujinx (spec 083).
+  static constexpr double kPanEchoWindow = 0.2;
+
+  // --- Arrastar na grade (spec 133) ----------------------------------------
+  //
+  // O gesto NAO reimplementa regra nenhuma: ele move o cursor e dispara as
+  // MESMAS acoes que o A dispara. Todo bloqueio (FormatBlockReason, o
+  // verificador, os portoes do bloco) continua valendo porque quem decide
+  // e o `pick_or_drop`, nao o arrasto — TD-01 da spec.
+  //
+  // Por modo:
+  //   Mover      — leva e SOLTA no destino
+  //   Trocar     — leva e TROCA com o ocupante do destino
+  //   Selecao    — pinta a area (as tres fases da spec 088)
+  //
+  // Terminar FORA da grade cancela, como o B.
+
+  // Slot sob um ponto de tela, no painel dado. npos se o ponto nao cai em
+  // celula nenhuma — e o que detecta "soltou fora da grade".
+  std::size_t SlotAt(const BoxPanel& p, brls::Point pt) const {
+    for (std::size_t i = 0; i < p.cells.size(); ++i) {
+      if (p.cells[i]->getFrame().pointInside(pt)) return i;
+    }
+    return static_cast<std::size_t>(-1);
+  }
+
+  // Em qual painel o ponto caiu? Devolve nullptr fora dos dois.
+  BoxPanel* PanelAt(brls::Point pt) {
+    if (left_.root && left_.root->getFrame().pointInside(pt)) return &left_;
+    if (right_.root && right_.root->getFrame().pointInside(pt)) return &right_;
+    return nullptr;
+  }
+
+  // Leva o cursor a um slot pelo caminho do FOCO — o mesmo que o d-pad usa.
+  // Assim `activeLeft_` e `cursor_` sao atualizados pelo on_focus da celula,
+  // e nao por atribuicao direta que poderia divergir do que a tela desenha.
+  void FocusSlot(BoxPanel& p, std::size_t slot) {
+    if (slot < p.cells.size()) brls::Application::giveFocus(p.cells[slot]);
+  }
+
+  void OnGridPan(std::size_t from_slot, const brls::PanGestureStatus& st) {
+    switch (st.state) {
+      case brls::GestureState::START: {
+        // O arrasto comeca no slot que o dedo encostou. Levar o foco ate ali
+        // antes de agir faz o gesto operar sobre o slot certo mesmo quando o
+        // cursor estava noutro lugar.
+        BoxPanel* p = PanelAt(st.startPosition);
+        if (!p) return;
+        FocusSlot(*p, from_slot);
+        pan_active_ = true;
+        // Pega. No modo Selecao isto ANCORA a area; nos outros, levanta o
+        // Pokemon. Quem decide e o pick_or_drop, com `swap` conforme o modo.
+        if (on_pan_pick_) on_pan_pick_();
+        break;
+      }
+
+      // STAY, e nao MOVE: o comentario do pan_gesture.hpp fala em MOVE, mas
+      // o enum de gesture.hpp so tem STAY para "dedo ainda na tela".
+      case brls::GestureState::STAY: {
+        if (!pan_active_) return;
+        // O cursor acompanha o dedo: no modo Selecao e isso que PINTA a area,
+        // porque a pintura segue o cursor (spec 088).
+        BoxPanel* p = PanelAt(st.position);
+        if (!p) return;
+        const std::size_t slot = SlotAt(*p, st.position);
+        if (slot == static_cast<std::size_t>(-1)) return;
+        // So mexe quando muda de slot — reposicionar o foco a cada quadro
+        // dispararia o on_focus dezenas de vezes por segundo.
+        if (p == (activeLeft_ ? &left_ : &right_) && slot == cursor_) return;
+        FocusSlot(*p, slot);
+        break;
+      }
+
+      case brls::GestureState::END: {
+        if (!pan_active_) return;
+        pan_active_ = false;
+        // Guarda QUANDO o dedo saiu e se o gesto foi um arrasto de verdade:
+        // e com isto que o Tap seguinte decide se e eco ou toque novo.
+        {
+          const float gx = st.position.x - st.startPosition.x;
+          const float gy = st.position.y - st.startPosition.y;
+          pan_had_gesture_ = (gx * gx + gy * gy) > (kDragSlop * kDragSlop);
+          pan_end_time_ = pokehome::nlog::Seconds();
+        }
+
+        // Soltar FORA da grade cancela o gesto, como o B.
+        BoxPanel* p = PanelAt(st.position);
+        const std::size_t slot = p ? SlotAt(*p, st.position)
+                                   : static_cast<std::size_t>(-1);
+        if (!p || slot == static_cast<std::size_t>(-1)) {
+          NLOG_ACT("arrasto CANCELADO: soltou fora da grade");
+          if (on_pan_cancel_) on_pan_cancel_();
+          return;
+        }
+        if (on_pan_drop_) on_pan_drop_();
+        // O soltar pode ter sido RECUSADO (bloqueio de formato, verificador —
+        // TD-01): com o A isso e correto, porque o Pokemon fica na mao e o
+        // cursor continua ali para solta-lo noutro lugar. No arrasto o dedo
+        // ja saiu: deixar na mao penduraria o Pokemon sem nada que o carregue
+        // e com o slot de origem vazio na tela. Entao devolve.
+        if (session_.Holding()) {
+          NLOG_ACT("arrasto recusado no destino: devolvendo a origem");
+          session_.Cancel();
+          Refresh();
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  // Entra num modo de cursor. `via` so aparece no log, dizendo QUEM pediu.
+  //
+  // Extraido do ciclo do ZL/ZR para o TOQUE numa pilula do ModeStrip (spec
+  // 133) entrar pelo mesmo caminho: o toque vai DIRETO ao modo tocado, sem
+  // passar pelos intermediarios, mas a limpeza de estado tem de ser a mesma.
+  bool SetMode(bx::CursorMode to, const char* via) {
+    if (to == mode_) return true;  // tocar no modo ativo nao mexe em nada
+    // Sair de um modo limpa o estado dele: carregar Pokemon na mao ou marcas
+    // para outro modo confundiria mais do que ajudaria.
+    if (session_.Holding()) session_.Cancel();
+    ResetSelection();  // a area do modo Selecao morre junto (spec 088)
+    const bx::CursorMode from = mode_;
+    mode_ = to;
+    NLOG_NAV("%s trocar modo: %s -> %s", via, bx::CursorModeName(from),
+             bx::CursorModeName(mode_));
+    Refresh();
+    return true;
+  }
+
+  // Toque numa seta do cabecalho (spec 133). A seta sabe de QUAL painel ela
+  // e; o L/R fisico, nao — ele age no ativo. Entao o toque primeiro traz o
+  // foco para o painel da seta e so depois delega ao MESMO StepBox.
+  void TouchStepBox(bool left, int dir) {
+    if (activeLeft_ != left) {
+      BoxPanel& p = left ? left_ : right_;
+      if (!p.cells.empty()) {
+        // giveFocus dispara o on_focus da celula, que atualiza activeLeft_ e
+        // cursor_ — o mesmo caminho do foco por botao.
+        brls::Application::giveFocus(p.cells[std::min(cursor_, p.cells.size() - 1)]);
+      }
+    }
+    StepBox(dir);
+  }
+
+  // Troca a caixa aberta do painel ativo. `dir` e -1 (L) ou +1 (R).
+  //
+  // Extraido das duas acoes de botao para o TOQUE nas setas do cabecalho
+  // (spec 133) reusar a MESMA regra: a visao geral vira pagina, a selecao e
+  // descartada salvo bloco levantado, e o indice da volta. Duplicar isso no
+  // gesto criaria duas verdades sobre trocar de caixa.
+  bool StepBox(int dir) {
+    BoxPanel& p = Active();
+    // Visao geral: L/R viram a PAGINA de caixas (spec 105).
+    if (p.overview) {
+      const std::size_t pg = p.OverviewPages();
+      p.ov_page = (p.ov_page + (dir > 0 ? 1 : pg - 1)) % pg;
+      NLOG_NAV("%c pagina da visao geral: %zu/%zu", dir > 0 ? 'R' : 'L',
+               p.ov_page + 1, pg);
+      Refresh();
+      return true;
+    }
+    // Marcas e area valem so na caixa corrente (specs 021 e 088) — mas um
+    // bloco JA levantado atravessa: carregar Pokemon de uma caixa para outra
+    // e justamente para o que ele serve.
+    if (selPhase_ != SelPhase::kSegurando) ResetSelection();
+    const std::size_t n = p.source->BoxCount();
+    const std::size_t from = p.box;
+    p.box = (p.box + (dir > 0 ? 1 : n - 1)) % n;
+    NLOG_NAV("%c caixa: %zu -> %zu (painel %s, de %zu)", dir > 0 ? 'R' : 'L',
+             from, p.box, activeLeft_ ? "esq" : "dir", n);
+    Refresh();
+    return true;
+  }
 
   brls::Box* MakeTopBar() {
     auto* bar = new brls::Box(brls::Axis::ROW);
@@ -6070,6 +6224,28 @@ class BoxActivity : public brls::Activity {
     // tres icones mais a folga que o degrade precisa para sumir nas pontas.
     modeStrip_->setSize(
         brls::Size(kModeCell * kModeCount + 46.0f, kModeStripH));
+    // Toque numa pilula (spec 133). O ModeStrip desenha os tres modos em
+    // nanovg, sem uma View por pilula — entao o alvo do dedo e a faixa
+    // inteira, e QUAL modo foi tocado sai do x, pela MESMA formula do
+    // draw(): cx = centro + (i-1)*kModeCell.
+    //
+    // Vai DIRETO ao modo tocado (SetMode), sem ciclar: tocar "Selecionar"
+    // com o cursor em "Trocar" nao pode passar por "Mover" no caminho.
+    modeStrip_->addGestureRecognizer(new brls::TapGestureRecognizer(
+        [this](brls::TapGestureStatus status, brls::Sound*) {
+          if (status.state != brls::GestureState::END) return;
+          const brls::Rect f = modeStrip_->getFrame();
+          const float rel = status.position.x - f.getMidX();
+          // Arredonda para a pilula mais proxima e prende na faixa valida.
+          int i = static_cast<int>(std::lround(rel / kModeCell)) + 1;
+          i = std::max(0, std::min(static_cast<int>(kModeCount) - 1, i));
+          // A ordem VISUAL da faixa e trocar, mover, selecionar (kFiles), que
+          // nao e a ordem do enum — mapeada aqui, num lugar so.
+          static const bx::CursorMode kByColumn[3] = {
+              bx::CursorMode::kSwap, bx::CursorMode::kMove,
+              bx::CursorMode::kSelect};
+          SetMode(kByColumn[i], "toque");
+        }));
     modes->addView(modeStrip_);
 
     auto* zr = new brls::Label();
@@ -6460,16 +6636,8 @@ class BoxActivity : public brls::Activity {
     root->registerAction("Trocar painel", brls::BUTTON_LSB, swap_panel, false);
 
     auto cycle = [this](bool forward) {
-      // Sair de um modo limpa o estado dele: carregar Pokemon na mao ou marcas
-      // para outro modo confundiria mais do que ajudaria.
-      if (session_.Holding()) session_.Cancel();
-      ResetSelection();  // a area do modo Selecao morre junto (spec 088)
-      const bx::CursorMode from = mode_;
-      mode_ = forward ? bx::NextMode(mode_) : bx::PrevMode(mode_);
-      NLOG_NAV("%s trocar modo: %s -> %s", forward ? "ZR" : "ZL",
-               bx::CursorModeName(from), bx::CursorModeName(mode_));
-      Refresh();
-      return true;
+      return SetMode(forward ? bx::NextMode(mode_) : bx::PrevMode(mode_),
+                     forward ? "ZR" : "ZL");
     };
     root->registerAction(
         "Modo anterior", brls::BUTTON_LT,
@@ -6477,16 +6645,10 @@ class BoxActivity : public brls::Activity {
     root->registerAction(
         "Proximo modo", brls::BUTTON_RT,
         [cycle](brls::View*) { return cycle(true); }, false);
-    // Stick direito (clique) abre a lista: A, X e Y ja tem uso, e A sera
-    // "pegar Pokemon" na Fase 4 — usa-lo agora criaria retrabalho.
-    root->registerAction(
-        "Lista", brls::BUTTON_RSB,
-        [this](brls::View*) {
-          NLOG_NAV("RSB -> ListActivity");
-          brls::Application::pushActivity(new ListActivity(save_));
-          return true;
-        },
-        false);
+    // O stick direito (RSB) abria a "lista de criaturas" ate a spec 142. A
+    // tela foi REMOVIDA — visual da spec 010 que nunca acompanhou o resto do
+    // app, sem anuncio em rodape nenhum, e ignorando o NestBox. O dono a
+    // encontrou por acidente e mandou remover. O RSB ficou livre.
     // Restaurar backup fica no + porque e destino, nao atalho: um toque
     // acidental num botao de acao nao pode reverter horas de jogo (spec 037).
     // So aparece com um save de arquivo aberto — restaurar exige saber em qual
@@ -6499,62 +6661,21 @@ class BoxActivity : public brls::Activity {
           return true;
         },
         false);
-    root->registerAction(
-        "Enciclopedia", brls::BUTTON_X,
-        [this](brls::View*) {
-          NLOG_NAV("X -> DexActivity (enciclopedia)");
-          // As duas fontes e a sessao: o que esta no NestBox tambem conta, e a
-          // movimentacao pendente e respeitada (spec 026).
-          brls::Application::pushActivity(
-              new DexActivity(save_, nest_, &session_));
-          return true;
-        },
-        false);
+    // O X abria a Pokedex daqui ate a spec 142. REMOVIDO por decisao do dono:
+    // a Pokedex tem UM acesso, o botao POKEDEX do menu principal. Era um
+    // atalho invisivel — nao aparecia em rodape nenhum —, o mesmo problema
+    // de descoberta que fez a "lista de criaturas" ser encontrada por
+    // acidente. O X ficou livre.
+    //
+    // O que se perde, assumido: o atalho passava a SESSAO
+    // (`&session_`), entao a dex contava a movimentacao pendente (spec 026).
+    // O caminho do menu passa so (save_, nest_) — ver TD-03 da spec 142.
     root->registerAction(
         "Caixa anterior", brls::BUTTON_LB,
-        [this](brls::View*) {
-          BoxPanel& p = Active();
-          // Visao geral: L/R viram a PAGINA de caixas (spec 105).
-          if (p.overview) {
-            const std::size_t pg = p.OverviewPages();
-            p.ov_page = (p.ov_page + pg - 1) % pg;
-            NLOG_NAV("L pagina da visao geral: %zu/%zu", p.ov_page + 1, pg);
-            Refresh();
-            return true;
-          }
-          // Marcas e area valem so na caixa corrente (specs 021 e 088) — mas
-          // um bloco JA levantado atravessa: carregar Pokemon de uma caixa
-          // para outra e justamente para o que ele serve.
-          if (selPhase_ != SelPhase::kSegurando) ResetSelection();
-          const std::size_t n = p.source->BoxCount();
-          const std::size_t from = p.box;
-          p.box = (p.box + n - 1) % n;
-          NLOG_NAV("L caixa: %zu -> %zu (painel %s, de %zu)", from, p.box,
-                   activeLeft_ ? "esq" : "dir", n);
-          Refresh();
-          return true;
-        },
-        false);
+        [this](brls::View*) { return StepBox(-1); }, false);
     root->registerAction(
         "Proxima caixa", brls::BUTTON_RB,
-        [this](brls::View*) {
-          BoxPanel& p = Active();
-          if (p.overview) {
-            const std::size_t pg = p.OverviewPages();
-            p.ov_page = (p.ov_page + 1) % pg;
-            NLOG_NAV("R pagina da visao geral: %zu/%zu", p.ov_page + 1, pg);
-            Refresh();
-            return true;
-          }
-          if (selPhase_ != SelPhase::kSegurando) ResetSelection();
-          const std::size_t from = p.box;
-          p.box = (p.box + 1) % p.source->BoxCount();
-          NLOG_NAV("R caixa: %zu -> %zu (painel %s, de %zu)", from, p.box,
-                   activeLeft_ ? "esq" : "dir", p.source->BoxCount());
-          Refresh();
-          return true;
-        },
-        false);
+        [this](brls::View*) { return StepBox(+1); }, false);
     // A visao geral (spec 105) NAO tem atalho de botao: o acesso e o toque
     // na pilula do rodape do painel, como no HOME — decisao do dono
     // (2026-08-17). O − continua reservado ao Ajuda.
@@ -6568,7 +6689,11 @@ class BoxActivity : public brls::Activity {
     // `swap` e o atalho do Y (spec 100): forca a semantica de TROCA e pula o
     // menu de contexto do modo Mover, sem alterar `mode_`. O A passa false e
     // se comporta como sempre.
-    auto pick_or_drop = [this](bool swap) {
+    // `no_menu` existe para o ARRASTO (spec 133): no modo Mover o toque
+    // simples abre o menu de contexto (spec 095), mas arrastar tem de LEVAR o
+    // Pokemon — sao gestos diferentes com significados diferentes. Sem esta
+    // saida, o arrasto abriria o menu e o dedo soltaria no vazio.
+    auto pick_or_drop = [this](bool swap, bool no_menu = false) {
           BoxPanel& p = Active();
           // Visao geral (spec 105): A ABRE a caixa apontada — o painel volta
           // a vista normal ja nela. Nenhum outro gesto atravessa.
@@ -6802,7 +6927,7 @@ class BoxActivity : public brls::Activity {
             // So dois itens por enquanto: os outros quatro da folha (resumo,
             // marcacoes, visual, liberar) ficam de fora ate terem para onde
             // ir. Item que nao faz nada e pior que item ausente.
-            if (!swap && mode_ == bx::CursorMode::kMove) {
+            if (!swap && !no_menu && mode_ == bx::CursorMode::kMove) {
               NLOG_NAV("A -> menu de contexto de %s (caixa %zu slot %zu)",
                        DisplaySpecies(current).c_str(), p.box, cursor_);
               const std::string nome = DisplaySpecies(current);
@@ -6844,18 +6969,74 @@ class BoxActivity : public brls::Activity {
     // levanta o Pokemon e solta trocando com o ocupante — mas NAO muda o modo
     // do cursor: terminado o gesto, a barra de modos continua onde estava.
     // Substituiu o "Detalhes" (TD-01 da spec 100).
+    // Arrastar na grade (spec 133): o gesto dispara o MESMO pick_or_drop do
+    // A, com `swap` decidido pelo modo. No modo Trocar o arrasto troca com o
+    // ocupante do destino; no Mover, solta; no Selecao, o proprio
+    // pick_or_drop cuida das tres fases (ancorar / fechar / soltar).
+    on_pan_pick_ = [this, pick_or_drop] {
+      pick_or_drop(mode_ == bx::CursorMode::kSwap, /*no_menu=*/true);
+    };
+    on_pan_drop_ = [this, pick_or_drop] {
+      // No modo Selecao, soltar e o TERCEIRO A do gesto — a mesma chamada,
+      // porque a fase esta em selPhase_.
+      pick_or_drop(mode_ == bx::CursorMode::kSwap, /*no_menu=*/true);
+    };
+    // Soltar fora da grade: desfaz como o B faria, sem sair da tela.
+    on_pan_cancel_ = [this] {
+      if (session_.Holding()) session_.Cancel();
+      ResetSelection();
+      Refresh();
+    };
+    // Toque SIMPLES numa celula (spec 133): dispara o mesmo que o A — o que,
+    // no modo Mover, abre o MENU DE CONTEXTO (spec 095). E o que diferencia o
+    // toque do arrasto: tocar pergunta, arrastar leva.
+    auto on_tap = [this, pick_or_drop](std::size_t, brls::Point at) {
+      // Um arrasto termina com o dedo levantado sobre uma celula, e o
+      // TapGesture da celula dispara junto. Esse eco precisa ser ignorado,
+      // senao todo arrasto abriria o menu de contexto por cima do movimento
+      // que acabou de acontecer.
+      //
+      // O eco chega JUNTO do fim do arrasto — mesmo instante, mesmo ponto.
+      // Um toque legitimo no slot de destino vem depois, e por isso o
+      // criterio e o TEMPO: so o eco imediato e descartado.
+      //
+      // Posicao sozinha nao separa os dois (o toque legitimo cai onde o
+      // arrasto parou), e uma marca booleana fica presa quando o eco nao
+      // chega — as duas versoes anteriores desta guarda falharam assim.
+      (void)at;
+      const double agora = pokehome::nlog::Seconds();
+      const bool eco_de_arrasto =
+          pan_had_gesture_ && (agora - pan_end_time_) < kPanEchoWindow;
+      pan_had_gesture_ = false;
+      if (eco_de_arrasto) return;
+      pick_or_drop(mode_ == bx::CursorMode::kSwap);
+    };
+
+    // A celula so avisa de onde o gesto partiu; quem interpreta e a tela.
+    for (BoxPanel* p : {&left_, &right_}) {
+      for (SlotCell* c : p->cells) {
+        c->SetPanCallback([this](std::size_t slot,
+                                 const brls::PanGestureStatus& st) {
+          OnGridPan(slot, st);
+        });
+        c->SetTapCallback(on_tap);
+      }
+    }
+
+    auto y_shortcut = [this, pick_or_drop] {
+      // No modo Selecao o A tem gesto proprio de tres fases (spec 088); o
+      // atalho nao o atravessa.
+      if (mode_ == bx::CursorMode::kSelect) {
+        NLOG_NAV("Y ignorado: modo Selecao tem gesto proprio");
+        return true;
+      }
+      return pick_or_drop(true);
+    };
+    // O toque na dica "Y Trocar" do rodape chama esta MESMA lambda.
+    on_y_shortcut_ = [y_shortcut] { y_shortcut(); };
     root->registerAction(
         "Trocar", brls::BUTTON_Y,
-        [this, pick_or_drop](brls::View*) {
-          // No modo Selecao o A tem gesto proprio de tres fases (spec 088); o
-          // atalho nao o atravessa.
-          if (mode_ == bx::CursorMode::kSelect) {
-            NLOG_NAV("Y ignorado: modo Selecao tem gesto proprio");
-            return true;
-          }
-          return pick_or_drop(true);
-        },
-        false);
+        [y_shortcut](brls::View*) { return y_shortcut(); }, false);
 
     // + renomeia a caixa aberta do NestBox (spec 030). So o NestBox: renomear
     // caixa do save exigiria escrever no save, que e a v3 do produto.
@@ -7182,132 +7363,57 @@ class BoxActivity : public brls::Activity {
     NLOG_ACT("SALVAR: %zu alteracoes pendentes, renomeado=%d",
              session_.changes().size(), renamed_ ? 1 : 0);
 
-    // Separa as alteracoes por lado ANTES de escrever qualquer coisa: se o
-    // backup falhar, nada pode ter sido gravado.
-    std::map<std::size_t, g3::BoxPokemon> save_changes;
-    std::vector<vw::BoxChange> modern_changes;
-    for (const auto& [ref, mon] : session_.changes()) {
-      if (ref.source == kNestId) continue;
-      save_changes[ref.box * g3::kSlotsPerBox + ref.slot] = mon;
-      modern_changes.push_back({ref.box, ref.slot, mon});
-    }
-
     auto* save = dynamic_cast<SaveSource*>(save_);
     auto* modern = dynamic_cast<ModernSaveSource*>(save_);
-    if (!save_changes.empty() && !save && !modern) {
-      NLOG_ACT("FALHA salvar: %zu alteracoes no painel do save, mas a fonte "
-               "nao e gravavel",
-               save_changes.size());
-      return false;
-    }
-    // Conversao entre geracoes no COMMIT (spec 111). O dry-run do drop ja
-    // aprovou cada gesto; aqui a conversao roda de verdade, com a memoria de
-    // moveset do banco — que sera gravada logo abaixo, no mesmo ciclo. Uma
-    // falha aqui aborta com TUDO intacto (nada foi escrito ainda).
-    if (modern) {
-      const msv::Game dest_ms = MsGameOfSave(modern->GameEnum());
-      for (vw::BoxChange& ch : modern_changes) {
-        if (ch.mon.empty()) continue;
-        if (!ch.mon.modern) {
-          // Subida gen3 -> Switch: o snapshot gen3 entra na memoria e o
-          // moveset vira o do jogo (ou o memorizado de la, G11).
-          auto up = g3x::ConvertUp(ch.mon.raw, modern->PkmFormat(), dest_ms,
-                                   &nest->movesets());
-          if (!up) {
-            NLOG_ACT("FALHA salvar: ConvertUp recusou (caixa %zu slot %zu) — "
-                     "nada foi gravado",
-                     ch.box, ch.slot);
-            return false;
-          }
-          ch.mon.modern = std::make_shared<const pkm::Pokemon>(std::move(*up));
-        } else if (ch.mon.modern->format != modern->PkmFormat()) {
-          auto conv = pkm::Convert(*ch.mon.modern, modern->PkmFormat());
-          if (!conv) {
-            NLOG_ACT("FALHA salvar: Convert entre formatos recusou (caixa %zu "
-                     "slot %zu) — nada foi gravado",
-                     ch.box, ch.slot);
-            return false;
-          }
-          ch.mon.modern =
-              std::make_shared<const pkm::Pokemon>(std::move(*conv));
-        } else {
-          // MESMO formato (spec 125): a entrada num jogo que nao e o de
-          // origem tambem restaura o moveset memorizado de la (ou reseta
-          // pelo learnset, G11/G12) — antes so a conversao fazia isso, e o
-          // Pokemon voltava da NestBox com os golpes originais em vez dos
-          // do jogo.
-          pkm::Pokemon copy = *ch.mon.modern;
-          if (copy.home_tracker != 0 &&
-              msv::OriginBucket(copy) != dest_ms) {
-            const std::uint16_t dex = pkm::NationalDex(copy);
-            const std::uint8_t lvl =
-                pokehome::species::LevelFromExp(dex, copy.exp);
-            nest->movesets().ApplyOnEntry(copy, dest_ms, lvl);
-            for (int i = 0; i < 4; ++i) {
-              copy.pp[i] = copy.moves[i]
-                               ? pokehome::movepp::Modern(
-                                     static_cast<std::uint8_t>(copy.format),
-                                     copy.moves[i])
-                               : 0;
-            }
-            ch.mon.modern =
-                std::make_shared<const pkm::Pokemon>(std::move(copy));
-          }
-        }
-      }
-    }
-    if (save) {
-      for (auto& [idx, mon] : save_changes) {
-        if (mon.empty() || !mon.modern) continue;
-        // Descida Switch -> gen3: o moveset moderno fica memorizado e o raw
-        // gen3 e construido (com o gen3 original restaurado, se houver).
-        std::uint8_t raw[80];
-        if (!g3x::ConvertDown(*mon.modern, LearnsetOfGen3(save->GameId()),
-                              MsGameOfPkm(*mon.modern), &nest->movesets(),
-                              Gen3OriginCode(save->GameId()), raw)) {
-          NLOG_ACT("FALHA salvar: ConvertDown recusou (indice %zu) — nada "
-                   "foi gravado",
-                   idx);
-          return false;
-        }
-        std::memcpy(mon.raw, raw, sizeof(mon.raw));
-        mon.modern.reset();
-      }
+
+    // --- DECIDIR (spec 128) --------------------------------------------
+    //
+    // Toda a decisao — separar por lado, converter na subida/descida/mesmo
+    // formato, e o relembrar da chegada a NestBox — mora agora em
+    // `source/core/commit_plan.cpp`, coberta por `test_commit_plan`. Aqui
+    // ficou so o que tem I/O e portanto pode falhar de verdade.
+    std::vector<cmt::Change> changes;
+    changes.reserve(session_.changes().size());
+    for (const auto& [ref, mon] : session_.changes()) {
+      changes.push_back({ref.source == kNestId, ref.box, ref.slot, mon});
     }
 
+    cmt::SaveInfo info;
+    if (modern) {
+      info.kind = cmt::SaveKind::kModerno;
+      info.formato = modern->PkmFormat();
+      info.jogo_ms = MsGameOfSave(modern->GameEnum());
+      info.trainer_name = modern->TrainerName();
+    } else if (save) {
+      info.kind = cmt::SaveKind::kGen3;
+      info.learnset_gen3 = LearnsetOfGen3(save->GameId());
+      info.origem_gen3 = Gen3OriginCode(save->GameId());
+    }
+
+    const cmt::Plan plan =
+        cmt::BuildPlan(changes, info, &nest->movesets());
+    if (!plan.ok()) {
+      // Uma falha aqui custa zero: nada foi escrito ainda.
+      NLOG_ACT("FALHA salvar: %s — nada foi gravado", plan.error.c_str());
+      return false;
+    }
+
+    // --- EXECUTAR ------------------------------------------------------
+    //
     // ORDEM (spec 106): o NestBox e gravado PRIMEIRO, o save DEPOIS. E o que
     // elimina a janela que perdeu Pokemon no Switch: na ordem antiga, o save
     // ja tinha sido escrito (Pokemon removido) quando uma falha do banco
     // jogava as mudancas fora. Na ordem nova, qualquer falha aborta com o
     // SAVE INTACTO — e se o save falhar depois do banco, o banco e regravado
-    // com o conteudo anterior (rollback). O pior caso vira "sobrou uma copia",
-    // nunca "sumiu".
+    // com o conteudo anterior (rollback). O pior caso vira "sobrou uma
+    // copia", nunca "sumiu".
     const nest::NestData nest_before = nest->data();
-    for (const auto& [ref, mon] : session_.changes()) {
-      if (ref.source != kNestId) continue;
-      if (mon.empty()) {
-        nest->Clear(ref.box, ref.slot);
-        continue;
+    for (const cmt::Change& c : plan.nest_writes) {
+      if (c.mon.empty()) {
+        nest->Clear(c.box, c.slot);
+      } else {
+        nest->Put(c.box, c.slot, c.mon);
       }
-      // Chegada a NestBox (spec 125): o Pokemon "relembra" os golpes do
-      // jogo de ORIGEM ja aqui, sem precisar voltar la — regra do dono. O
-      // moveset do jogo de onde ele saiu fica memorizado para a proxima
-      // ida. So age em mon moderno vindo do save aberto; mover dentro da
-      // caixa nao re-memoriza (guarda do RestoreOnBank).
-      if (mon.modern && modern) {
-        pkm::Pokemon copy = *mon.modern;
-        if (msv::RestoreOnBank(copy, nest->movesets(),
-                               MsGameOfSave(modern->GameEnum()))) {
-          copy.raw = vw::WriteModern(copy);
-          if (!copy.raw.empty()) {
-            g3::BoxPokemon restaurado = mon;
-            restaurado.modern = std::make_shared<const pkm::Pokemon>(copy);
-            nest->Put(ref.box, ref.slot, restaurado);
-            continue;
-          }
-        }
-      }
-      nest->Put(ref.box, ref.slot, mon);
     }
     if (!SaveNestBox(nest->data())) {
       NLOG_ACT("FALHA salvar: SaveNestBox recusou. O save NAO foi tocado.");
@@ -7318,7 +7424,7 @@ class BoxActivity : public brls::Activity {
     // BACKUP OBRIGATORIO antes de tocar no save (spec 032). Falhou, nao
     // escreve — nao existe caminho que grave sem rede. Vale para as DUAS
     // fontes gravaveis: gen3 (spec 033) e moderna (spec 086).
-    if (!save_changes.empty()) {
+    if (plan.touches_save()) {
       // Qualquer falha daqui em diante desfaz o banco para o estado anterior.
       // Se ate o rollback falhar, o banco fica com as mudancas a mais e o
       // save intacto — duplicata recuperavel, nunca perda (TD-01 da spec 106).
@@ -7331,30 +7437,30 @@ class BoxActivity : public brls::Activity {
       };
       if (save) {
         NLOG_ACT("  %zu alteracoes no save \"%s\" — backup obrigatorio primeiro",
-                 save_changes.size(), save->path().c_str());
+                 plan.save_changes.size(), save->path().c_str());
         if (!BackupSave(save->path(), save->bytes())) {
           NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
           rollback();
           return false;
         }
-        if (!save->WriteChanges(save_changes)) {
+        if (!save->WriteChanges(plan.save_changes)) {
           NLOG_ACT("FALHA salvar: WriteChanges recusou em \"%s\" (%zu slots)",
-                   save->path().c_str(), save_changes.size());
+                   save->path().c_str(), plan.save_changes.size());
           rollback();
           return false;
         }
         NLOG_ACT("  save gravado: \"%s\"", save->path().c_str());
       } else if (modern) {
         NLOG_ACT("  %zu alteracoes no save moderno \"%s\" — backup primeiro",
-                 modern_changes.size(), modern->backup_label().c_str());
+                 plan.modern_changes.size(), modern->backup_label().c_str());
         if (!BackupSave(modern->backup_label(), modern->bytes())) {
           NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
           rollback();
           return false;
         }
-        if (!modern->WriteChanges(modern_changes)) {
+        if (!modern->WriteChanges(plan.modern_changes)) {
           NLOG_ACT("FALHA salvar: WriteChanges moderno recusou (%zu slots)",
-                   modern_changes.size());
+                   plan.modern_changes.size());
           rollback();
           return false;
         }
@@ -7583,7 +7689,42 @@ class BoxActivity : public brls::Activity {
       statName_->setText(mon.nickname.empty() ? DisplaySpecies(mon)
                                               : mon.nickname);
       FillStatGrid(mon);
-      SetInfo("");
+
+      // EM REPOUSO, o rodape diz POR QUE o cartao esta marcado (spec 131).
+      //
+      // O icone vermelho ja aparecia desde a spec 104, mas so o icone: o
+      // jogador tinha de TENTAR soltar para descobrir o motivo — foi o que o
+      // dono viveu com o Growlithe/Rapidash no Z-A. O texto aqui e o mesmo
+      // que o gesto ja mostrava ("Nao existe em X"); a diferenca e chegar
+      // ANTES do gesto, e nao como explicacao de uma recusa.
+      //
+      // A comparacao e contra `ref_game` — o jogo do SAVE ABERTO —, e nao
+      // contra a fonte do painel. E o que faz o aviso valer tambem dentro do
+      // NestBox, que aceita todas as especies: o que importa e se o Pokemon
+      // vai poder sair dali para o jogo aberto.
+      std::string aviso;
+      if (p.ref_game != cp::Game::kCount) {
+        const int dex =
+            mon.national_dex ? mon.national_dex : g3::NationalDex(mon.species);
+        if (!cp::HasSpecies(p.ref_game, dex)) {
+          aviso = std::string("Nao existe em ") + cp::GameName(p.ref_game);
+        } else {
+          // Sem precedencia entre os dois avisos (pedido do dono na spec
+          // 104): a especie cabe, mas um golpe pode nao caber. O texto do
+          // golpe so aparece quando a especie passou.
+          const int missing = cp::MissingMoveIn(
+              p.ref_game, mon.moves, sizeof(mon.moves) / sizeof(mon.moves[0]));
+          if (missing != 0) {
+            const std::string name =
+                DisplayMove(static_cast<std::uint16_t>(missing));
+            aviso = "Aviso: " +
+                    (name.empty() ? ("golpe #" + std::to_string(missing))
+                                  : name) +
+                    " nao existe em " + cp::GameName(p.ref_game);
+          }
+        }
+      }
+      SetInfo(aviso);
     }
   }
 
@@ -7860,6 +8001,27 @@ class BoxActivity : public brls::Activity {
   std::vector<OverflowMon> overflow_;
   BlockOverflow* overflowView_ = nullptr;
 
+  // Arrasto em andamento (spec 133), e as acoes que ele dispara — ligadas em
+  // RegisterActions, onde o `pick_or_drop` existe.
+  bool pan_active_ = false;
+  // QUANDO o ultimo arrasto terminou, e se houve um. O Tap compara com isto
+  // para separar o eco do fim do arrasto de um toque legitimo posterior —
+  // ver `on_tap` em RegisterActions.
+  double pan_end_time_ = -1.0;
+  bool pan_had_gesture_ = false;
+  std::function<void()> on_pan_pick_;
+  std::function<void()> on_pan_drop_;
+  std::function<void()> on_pan_cancel_;
+
+  // Dica da direita do rodape ("Y Trocar"), para o dump publicar onde tocar.
+  brls::Label* hintLabel_ = nullptr;
+
+  // Acao do Y (atalho de troca), guardada para o TOQUE na dica do rodape
+  // (spec 133) disparar exatamente a mesma coisa. Precisa ser membro porque a
+  // legenda e montada em createContentView, ANTES de RegisterActions criar a
+  // lambda — sem a indirecao, a dica seria ligada a um callback ainda vazio.
+  std::function<void()> on_y_shortcut_;
+
   // Rotulo do B no rodape. Vira "Cancelar" durante a selecao (spec 088): ali
   // o B desfaz o gesto em vez de sair da tela, e o rodape tem de dizer isso.
   brls::Label* backLabel_ = nullptr;
@@ -7981,7 +8143,14 @@ class RestoreActivity : public brls::Activity {
  public:
   LogScreen log_screen_{"RestoreActivity"};
 
-  explicit RestoreActivity(SaveSource* save) : save_(save) {}
+  explicit RestoreActivity(SaveSource* save) : save_(save) {
+#ifndef __SWITCH__
+    // Controle remoto (spec 133): onde tocar a primeira linha de backup.
+    nestbox::script::SetStateProvider("RestoreActivity", [this] {
+      return ScriptRect("row0", firstRow_);
+    });
+#endif
+  }
 
   brls::View* createContentView() override {
     auto* root = new GradientBackground();
@@ -8224,7 +8393,9 @@ class FooterTab : public brls::Box {
 constexpr float kFooterHeight = 35.2f;  // 44 - 20% (pedido do dono)
 
 brls::Box* MakeLegendBar(bool back, brls::Label** out_back,
-                         const std::string& right_hint) {
+                         const std::string& right_hint,
+                         brls::Label** out_hint,
+                         std::function<void()> on_right_hint) {
   auto* row = new brls::Box(brls::Axis::ROW);
   row->setHeight(kFooterHeight);
   // CENTER, nao FLEX_END: alinha "Ajuda" e "Voltar" na mesma linha. Antes o
@@ -8252,11 +8423,23 @@ brls::Box* MakeLegendBar(bool back, brls::Label** out_back,
     label->setFontSize(21);
     label->setTextColor(kTextPrimary);
     label->setMarginLeft(26);
-    // O texto e so um rotulo do hint de B; sem isto o toque nele vaza para o
-    // que estiver atras, confundindo o usuario.
-    label->addGestureRecognizer(new brls::TapGestureRecognizer(
-        label, []() { brls::Application::popActivity(); }));
-    row->addView(label);
+    // O TapGesture precisa morar num Box, e nao no Label (spec 133).
+    //
+    // `View::hitTest` devolve nullptr quando a view nao e focavel, e um
+    // `brls::Label` nasce nao-focavel — entao o toque nunca chegava a este
+    // recognizer. `Box::hitTest`, ao contrario, devolve `this` para qualquer
+    // ponto dentro do frame. Tornar o Label focavel resolveria o toque, mas o
+    // poria na navegacao do d-pad e mudaria o caminho do cursor.
+    //
+    // Isto era um bug ANTERIOR a esta spec: o "Voltar" ja tinha TapGesture e
+    // ja nao respondia. O roteiro do controle remoto foi o que o revelou.
+    auto* back_hit = new brls::Box(brls::Axis::ROW);
+    back_hit->setMarginLeft(26);
+    label->setMarginLeft(0);
+    back_hit->addView(label);
+    back_hit->addGestureRecognizer(new brls::TapGestureRecognizer(
+        back_hit, []() { brls::Application::popActivity(); }));
+    row->addView(back_hit);
     // Devolvido para quem quiser trocar o texto conforme o estado da tela —
     // o modo Selecao troca "Voltar" por "Cancelar" (spec 088).
     if (out_back) *out_back = label;
@@ -8274,7 +8457,20 @@ brls::Box* MakeLegendBar(bool back, brls::Label** out_back,
     hint->setFontSize(21);
     hint->setTextColor(kTextPrimary);
     hint->setMarginRight(kScreenSideMargin);
-    row->addView(hint);
+    if (on_right_hint) {
+      // Mesmo motivo do "Voltar" acima: o alvo do toque tem de ser um Box.
+      auto* hit = new brls::Box(brls::Axis::ROW);
+      hit->setMarginRight(kScreenSideMargin);
+      hint->setMarginRight(0);
+      hit->addView(hint);
+      hit->addGestureRecognizer(
+          new brls::TapGestureRecognizer(hit, on_right_hint));
+      if (out_hint) *out_hint = hint;
+      row->addView(hit);
+    } else {
+      if (out_hint) *out_hint = hint;
+      row->addView(hint);
+    }
   }
 
   return row;
@@ -8373,6 +8569,12 @@ class MessageBox::PillButton : public brls::Box {
       setBackgroundColor(kAccent);
       label_->setTextColor(kWhite);
       if (glyph_) glyph_->setTextColor(kWhite);
+#ifndef __SWITCH__
+      // Controle remoto (spec 134): qual botao esta sob o foco AGORA. Mesmo
+      // gatilho que pinta o botao na tela — o dump nao pode discordar do que
+      // o usuario ve. Sem isto o roteiro aperta A sem saber em que botao.
+      g_script_focused_button = label_->getFullText();
+#endif
     }
 
     void onFocusLost() override {
@@ -8429,7 +8631,24 @@ class MessageBoxActivity : public brls::Activity {
                      bool cancelable)
       : text_(std::move(text)),
         buttons_(std::move(buttons)),
-        cancelable_(cancelable) {}
+        cancelable_(cancelable) {
+#ifndef __SWITCH__
+    // Controle remoto (spec 134): a pergunta na tela e o rotulo de cada botao.
+    // Sem isto o roteiro aperta A num dialogo sem saber ao que esta
+    // respondendo — que e navegar as cegas sobre uma decisao.
+    nestbox::script::SetStateProvider("MessageBoxActivity", [this] {
+      std::string out = "\"text\":\"" + ScriptEscape(text_) + "\"";
+      out += ",\"buttons\":[";
+      for (std::size_t i = 0; i < buttons_.size(); ++i) {
+        if (i) out += ",";
+        out += "\"" + ScriptEscape(buttons_[i].label) + "\"";
+      }
+      out += "]";
+      out += ",\"focus\":\"" + ScriptEscape(g_script_focused_button) + "\"";
+      return out;
+    });
+#endif
+  }
 
   brls::View* createContentView() override;
 
@@ -8440,6 +8659,19 @@ class MessageBoxActivity : public brls::Activity {
   bool isTranslucent() override { return true; }
 
  private:
+#ifndef __SWITCH__
+  // Escapa aspas e barra para o texto do dialogo nao quebrar o JSON do dump.
+  static std::string ScriptEscape(const std::string& in) {
+    std::string out;
+    for (char c : in) {
+      if (c == '"' || c == '\\') out += '\\';
+      // Quebra de linha vira espaco: o dump e uma linha so.
+      out += (c == '\n' || c == '\r') ? ' ' : c;
+    }
+    return out;
+  }
+#endif
+
   std::string text_;
   std::vector<MessageBox::Button> buttons_;
   bool cancelable_;
@@ -8551,7 +8783,22 @@ class ContextMenuActivity : public brls::Activity {
   };
 
   ContextMenuActivity(brls::Rect anchor, std::vector<Item> items)
-      : anchor_(anchor), items_(std::move(items)) {}
+      : anchor_(anchor), items_(std::move(items)) {
+#ifndef __SWITCH__
+    // Controle remoto (spec 134): os itens do menu e qual esta em foco. E o
+    // que permite ao roteiro escolher "Mover" em vez de contar setas.
+    nestbox::script::SetStateProvider("ContextMenuActivity", [this] {
+      std::string out = "\"items\":[";
+      for (std::size_t i = 0; i < items_.size(); ++i) {
+        if (i) out += ",";
+        out += "\"" + items_[i].label + "\"";
+      }
+      out += "]";
+      out += ",\"focus\":\"" + g_script_focused_button + "\"";
+      return out;
+    });
+#endif
+  }
 
   brls::View* createContentView() override;
 
@@ -8647,6 +8894,13 @@ class ContextMenuRow : public brls::Box {
     focused_ = true;
     setBackgroundColor(kMenuAmber);
     label_->setTextColor(kWhite);
+#ifndef __SWITCH__
+    // Controle remoto (spec 134): item do menu sob o foco. Mesma variavel do
+    // botao da MessageBox — os dois sao "o item em foco do overlay aberto",
+    // e so um deles existe por vez. Aqui, no mesmo gatilho que pinta o item
+    // de ambar: o dump nao pode discordar do que a tela mostra.
+    g_script_focused_button = label_->getFullText();
+#endif
   }
 
   void onFocusLost() override {
@@ -9371,6 +9625,20 @@ class UserSelectActivity : public brls::Activity {
     scanned_.insert(scanned_.begin(), home);
 
     for (const auto& sc : scanned_) saves_.push_back(sc.entry);
+
+#ifndef __SWITCH__
+    // Controle remoto (spec 134): quantos saves a varredura achou e qual esta
+    // sob o foco — sem isto o roteiro escolhe save as cegas.
+    nestbox::script::SetStateProvider("UserSelectActivity", [this] {
+      std::string out = "\"save_count\":" + std::to_string(saves_.size());
+      out += ",\"save\":\"";
+      for (char c : focused_title_) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += c;
+      }
+      return out + "\"";
+    });
+#endif
   }
 
   brls::View* createContentView() override {
@@ -9585,6 +9853,11 @@ class UserSelectActivity : public brls::Activity {
 
   // Preenche o painel esquerdo com o que se sabe do save em foco.
   void ShowInfo(const nestbox::SaveEntry& entry) {
+#ifndef __SWITCH__
+    // Controle remoto (spec 134): o save em foco. E o mesmo gatilho que
+    // preenche o painel — o dump nao pode discordar do que a tela mostra.
+    focused_title_ = entry.title;
+#endif
     if (infoTitle_) infoTitle_->setText(entry.title);
 
     std::string iconPath = entry.icon_path;
@@ -9805,6 +10078,10 @@ class UserSelectActivity : public brls::Activity {
   std::shared_ptr<std::size_t> gridColumn_ = std::make_shared<std::size_t>(0);
   std::map<std::string, FileInfo> fileInfo_;
   brls::View* firstCard_ = nullptr;
+#ifndef __SWITCH__
+  // Titulo do save sob o foco, para o `assert save <titulo>` do roteiro.
+  std::string focused_title_;
+#endif
   brls::Label* infoTitle_ = nullptr;
   brls::Image* infoIcon_ = nullptr;
   brls::Label* infoKeys_[kInfoRows] = {};
@@ -9819,6 +10096,23 @@ class MenuActivity : public brls::Activity {
   LogScreen log_screen_{"MenuActivity"};
 
   MenuActivity(BoxSource* nest, BoxSource* save) : nest_(nest), save_(save) {
+#ifndef __SWITCH__
+    // Controle remoto (spec 133): a geometria dos controles desta tela, para
+    // o roteiro MIRAR o toque em vez de chutar coordenadas.
+    nestbox::script::SetStateProvider("MenuActivity", [this] {
+      std::string out = ScriptRect("btn_pokemon", pokemonButton_);
+      const std::string dex = ScriptRect("btn_pokedex", dexButton_);
+      if (!dex.empty()) out += (out.empty() ? "" : ",") + dex;
+      // Versao no rodape (spec 130). O dump le o TEXTO do Label desenhado,
+      // nao o define do build — prova o que esta NA tela, nao a intencao.
+      if (versionLabel_) {
+        out += (out.empty() ? "" : ",") + std::string("\"version\":\"") +
+               versionLabel_->getFullText() + "\"";
+      }
+      return out;
+    });
+#endif
+
     // Especies distintas no save — o mesmo criterio da DexActivity.
     std::vector<bool> seen(387, false);
     for (std::size_t b = 0; b < g3::kBoxCount; ++b) {
@@ -9997,7 +10291,19 @@ class MenuActivity : public brls::Activity {
   }
 
   // Rodape com as dicas de botao, usando o glifo real do Switch.
-  brls::Box* MakeFooter() { return MakeLegendBar(/*back=*/false); }
+  brls::Box* MakeFooter() {
+    // Versao do build na direita (spec 130): em toda rodada de teste no
+    // console o dono precisava adivinhar qual build estava rodando. Reusa o
+    // slot de dica direita da legenda; rebaixado para leitura secundaria
+    // porque e informacao, nao botao.
+    auto* bar = MakeLegendBar(/*back=*/false, nullptr, "v" NESTBOX_VERSION,
+                              &versionLabel_);
+    if (versionLabel_) {
+      versionLabel_->setFontSize(18);
+      versionLabel_->setTextColor(kTextSecondary);
+    }
+    return bar;
+  }
 
   void SetSubtitle(const char* text) {
     if (subtitle_) subtitle_->setText(text);
@@ -10071,6 +10377,7 @@ class MenuActivity : public brls::Activity {
   brls::Label* previewTitle_ = nullptr;
   MenuButton* pokemonButton_ = nullptr;
   MenuButton* dexButton_ = nullptr;
+  brls::Label* versionLabel_ = nullptr;  // "v" + NESTBOX_VERSION (spec 130)
 };
 
 // --- Tela de carregamento --------------------------------------------------
@@ -10275,13 +10582,32 @@ int main(int argc, char* argv[]) {
   nestbox::ApplyPendingUpdate();
 
   std::string save_path;
+#ifndef __SWITCH__
+  std::string script_path;
+#endif
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "-d") == 0) {
       brls::Logger::setLogLevel(brls::LogLevel::LOG_DEBUG);
+#ifndef __SWITCH__
+      // Modo roteiro (spec 134): o agente dirige a UI e afirma o resultado
+      // sem olhar a tela. A opcao NAO EXISTE no console (TD-01) — nem o
+      // parse dela, para `--script` la cair no ramo do save e ser tratado
+      // como caminho invalido, em vez de ser aceito e ignorado em silencio.
+    } else if (std::strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
+      script_path = argv[++i];
+#endif
     } else if (save_path.empty()) {
       save_path = argv[i];
     }
   }
+
+#ifndef __SWITCH__
+  // Carregado ANTES de o borealis subir: roteiro invalido falha agora, sem
+  // abrir janela nem tocar em save nenhum.
+  if (!script_path.empty() && !nestbox::script::Load(script_path)) {
+    return EXIT_FAILURE;
+  }
+#endif
 
   // Antes do borealis: se a inicializacao falhar, o log tem de ter registrado
   // a tentativa.
@@ -10330,8 +10656,19 @@ int main(int argc, char* argv[]) {
   // Este e o unico ponto por onde todo frame passa. Ver TD-02 da spec 083.
   while (brls::Application::mainLoop()) {
     pokehome::nlog::Tick();
+#ifndef __SWITCH__
+    // Um passo do roteiro por frame, ENTRE os frames — nunca de dentro do
+    // borealis, para nao reentrar no laco (spec 134).
+    if (nestbox::script::Active() && !nestbox::script::Step()) {
+      break;
+    }
+#endif
   }
 
   NLOG_ACT("=== fim da sessao (%.1f s) ===", pokehome::nlog::Seconds());
+#ifndef __SWITCH__
+  // O roteiro manda no codigo de saida: e o que o ctest le.
+  if (!script_path.empty()) return nestbox::script::ExitCode();
+#endif
   return EXIT_SUCCESS;
 }

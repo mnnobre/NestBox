@@ -9,6 +9,7 @@ const char* FormatName(Format f) {
     case Format::kPB8: return "PB8";
     case Format::kPA8: return "PA8";
     case Format::kPK9: return "PK9";
+    case Format::kPK4: return "PK4";
     case Format::kNone: break;
   }
   return "?";

@@ -53,4 +53,33 @@ std::uint16_t SpeciesForFormat(std::uint16_t national_dex, Format fmt);
 // dentro do mesmo formato continua sob a regra conservadora da spec 063.
 std::optional<Pokemon> Convert(const Pokemon& origem, Format destino);
 
+// Ajustes de ENTRADA num formato diferente do de origem (spec 143).
+//
+// `Convert` reescreve o layout; estes sao os campos que o JOGO DE DESTINO
+// espera diferentes de como a origem os guardava. Sao coisas que nenhum
+// checksum acusa e que o PkHeX so revela pelo criterio DELTA (motivo que
+// aparece no destino e nao existia na origem).
+//
+// Existe como funcao separada, e nao como parte do Convert, por um motivo
+// concreto: ate a spec 143 esta logica vivia SO no `transfer::Commit`, e o
+// deposito pela tela (`ApplyBoxChanges`, via `commit_plan`) a pulava inteira
+// — um Pokemon do BDSP entrava no Legends: Arceus carregando o sentinela de
+// egg location do BDSP. Um caminho de escrita que nao chame isto esta errado
+// por construcao; `test_commit_plan` tranca essa porta.
+//
+// O que faz, e de onde cada regra veio (todas medidas, nenhuma deduzida):
+//
+//   PK9   obedience_level = met_level, scale = height_scalar  (spec 069/078)
+//   PB8   egg_location 0 -> 0xFFFF ; saindo do PB8, 0xFFFF -> 0
+//   PLA   effort_levels zerados (docs/pesquisa-effort-levels-pla.md)
+//
+// NAO mexe em moveset nem em handling trainer: o primeiro depende do learnset
+// e da memoria (msv::Memory), o segundo do save de destino — nenhum dos dois
+// esta ao alcance desta funcao, e ambos tem dono proprio no chamador.
+//
+// `origem_fmt` e o formato de ONDE o Pokemon veio. Se for igual ao formato de
+// `mon`, a funcao nao faz nada: mover dentro do mesmo jogo continua sob a
+// regra conservadora da spec 063.
+void AjustesDeEntrada(Pokemon& mon, Format origem_fmt);
+
 }  // namespace pkm

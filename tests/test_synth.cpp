@@ -266,6 +266,12 @@ static void CheckGen8(const pkm::Pokemon& p,
   // conferidas pelo bitfield cru.
   EqNonZero(p.ribbon_count_memory, AsInt(j, "RibbonCountMemoryContest"),
             t + "RibbonCountMemoryContest");
+  // D6 (spec 136): sao DOIS contadores independentes — contest no byte 60 e
+  // battle no 61 (medido em tools/pkhex-ribbon-av). A fixture os grava com
+  // valores DIFERENTES de proposito (17 e 23), entao ler o byte errado, ou
+  // ler so um, quebra aqui.
+  EqNonZero(p.ribbon_count_battle, AsInt(j, "RibbonCountMemoryBattle"),
+            t + "RibbonCountMemoryBattle");
   int ribbon_bytes_set = 0;
   for (std::size_t i = 0; i < p.ribbon_bytes.size(); ++i) {
     if (p.ribbon_bytes[i] != 0) ++ribbon_bytes_set;

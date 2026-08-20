@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -102,6 +103,46 @@ inline void WriteUtf16(std::uint8_t* d, std::size_t o, const std::string& s,
   // do buffer original (ver o comentario da TD-05 acima).
   if (out < max_chars) W16(d, o + out * 2, 0);
 }
+
+// Escreve um campo de nome de 26 bytes preservando os BYTES CRUS quando o
+// modelo os carrega (spec 145). O jogo escreve o nome por cima de buffer
+// usado e o lixo depois do terminador faz parte do registro — o PkHeX exige
+// o trash do OT nos capturados do Max Lair ("[Trainer] TrashBytesExpected",
+// 21 casos). Raw todo-zero = "nao veio de um formato de 26 bytes".
+//
+// O raw so vale se AINDA CORRESPONDER ao texto: reencodamos o texto e
+// comparamos ate o terminador, inclusive. A primeira versao confiava na
+// regra "quem muda o texto zera o raw" — e o proprio teste de mutacao do
+// pkm_write a derrubou na hora: mudou p.nickname sem zerar, e o Write
+// devolveu o nome velho. Conferir aqui protege TODO chamador, presente e
+// futuro, em vez de depender de cada um lembrar.
+inline void WriteName26(std::uint8_t* d, std::size_t o,
+                        const std::array<std::uint8_t, 26>& raw,
+                        const std::string& texto) {
+  bool tem_raw = false;
+  for (auto b : raw) {
+    if (b) { tem_raw = true; break; }
+  }
+  if (tem_raw) {
+    std::uint8_t tmp[26] = {};
+    WriteUtf16(tmp, 0, texto, 13);
+    // O prefixo comparado vai ate o terminador u16 (inclusive). Nome de 13
+    // chars enche o campo sem terminador: compara os 26 — sem espaco para
+    // trash, o raw teria de ser identico.
+    std::size_t fim = 0;
+    while (fim + 1 < sizeof(tmp)) {
+      const bool term = tmp[fim] == 0 && tmp[fim + 1] == 0;
+      fim += 2;
+      if (term) break;
+    }
+    if (std::memcmp(tmp, raw.data(), fim) == 0) {
+      std::memcpy(d + o, raw.data(), raw.size());
+      return;
+    }
+  }
+  WriteUtf16(d, o, texto, 13);
+}
+
 
 // Empacota as flags de hyper training: o modelo guarda em ordem FISICA
 // (HP,Atk,Def,Spe,SpA,SpD), o binario em ordem de EXIBICAO. Inverso exato do

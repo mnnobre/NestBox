@@ -224,18 +224,18 @@ void CheckBodySize(const pkm::Pokemon& p, LegalityResult& r) {
   std::size_t h_off = 0, w_off = 0;
   const pokehome::body::Entry* table = nullptr;
   std::size_t n = 0;
-  double h_a = 0, h_b = 0;
+  const pokehome::body::SizeRatio* ratio = nullptr;
 
   if (p.format == pkm::Format::kPB7) {
     h_off = 0x2C; w_off = 0xE4;
     table = pokehome::body::kGg;
     n = sizeof(pokehome::body::kGg) / sizeof(pokehome::body::kGg[0]);
-    h_a = 0.8; h_b = 0.6;
+    ratio = &pokehome::body::kRatioLgpe;
   } else if (p.format == pkm::Format::kPA8) {
     h_off = 0xAC; w_off = 0xB0;
     table = pokehome::body::kLa;
     n = sizeof(pokehome::body::kLa) / sizeof(pokehome::body::kLa[0]);
-    h_a = 0.4; h_b = 0.8;
+    ratio = &pokehome::body::kRatioPla;
   } else {
     return;
   }
@@ -252,7 +252,7 @@ void CheckBodySize(const pkm::Pokemon& p, LegalityResult& r) {
   // Mesma funcao que o conversor usa para GRAVAR (spec 121): formulas
   // separadas divergiriam e o verify reprovaria o que nos escrevemos.
   float calc_h = 0.0f, calc_w = 0.0f;
-  pokehome::body::Absolutes({h_a, h_b}, base_h, base_w, p.height_scalar,
+  pokehome::body::Absolutes(*ratio, base_h, base_w, p.height_scalar,
                             p.weight_scalar, &calc_h, &calc_w);
 
   const float got_h = ReadF32(p.raw, h_off);

@@ -101,6 +101,19 @@ Game OriginBucket(const pkm::Pokemon& p) {
   // Codigos de origem (GameVersion do PkHeX): gen3 1..5 e 15 (Colo/XD);
   // LGPE 42/43; SwSh 44/45; PLA 47; BDSP 48/49; SV 50/51; Z-A 52 (conferido
   // em save real — memoria za-origin-code-52).
+  // ANTES do codigo de versao: a descida para o SwSh reescreve origin_game
+  // para SW/SH e codifica a origem REAL no met_location (pkm_convert, medido
+  // no EntityConverter — o PK8 nao representa origem em jogo posterior). Sem
+  // esta leitura, um Pokemon do PLA dentro do SwSh parece NATIVO: o handler
+  // nao dispara ("Current handler cannot be the OT" em 330 registros) e a
+  // memoria de moveset o arquiva no bucket errado.
+  switch (p.met_location) {
+    case 60000: return Game::kLegendsArceus;          // PLA
+    case 59999: case 59998: return Game::kBdsp;       // BD / SP
+    case 59997: case 59996: return Game::kSV;         // SL / VL
+    default: break;
+  }
+
   const std::uint8_t o = p.origin_game;
   if ((o >= 1 && o <= 5) || o == 15) return Game::kGen3;
   if (o == 42 || o == 43) return Game::kLgpe;
@@ -126,7 +139,29 @@ bool RestoreOnBank(pkm::Pokemon& p, Memory& m, Game src) {
 
   const Snapshot* s = m.Recall(p.home_tracker, origem);
   if (!s) return false;
-  if (s->moves == p.moves) return false;  // ja restaurado (mover na box)
+
+  // IDENTIDADE DE ORIGEM (spec 145) — ANTES do atalho de moveset abaixo.
+  //
+  // O SwSh reescreve origin_game/met/egg/ball ao receber (commit_plan), e o
+  // registro que volta dele carrega o codigo do HOME (59996-60000) no lugar
+  // do local verdadeiro. Aqui e a volta: o bucket de origem tem o original
+  // guardado, e este e o ponto onde ele se restaura.
+  //
+  // Fica fora do `if (s->moves == p.moves) return false` de proposito: o
+  // moveset pode estar igual (nada a restaurar nele) e a identidade ainda
+  // precisar voltar. Guardar `mexeu` para nao devolver false quando o unico
+  // trabalho feito foi este.
+  bool mexeu = false;
+  if (s->origin_game != 0 && p.met_location >= 59996 &&
+      p.met_location <= 60000) {
+    p.origin_game = s->origin_game;
+    p.met_location = s->met_location;
+    p.egg_location = s->egg_location;
+    if (s->ball != 0) p.ball = s->ball;
+    mexeu = true;
+  }
+
+  if (s->moves == p.moves) return mexeu;  // ja restaurado (mover na box)
 
   // Memoriza o moveset do jogo de onde saiu ANTES de sobrescrever — e o que
   // a proxima ida aquele jogo restaura.
@@ -139,6 +174,20 @@ bool RestoreOnBank(pkm::Pokemon& p, Memory& m, Game src) {
                   ? pokehome::movepp::Modern(
                         static_cast<std::uint8_t>(p.format), p.moves[i])
                   : 0;
+  }
+
+  // Mecanicas de volta (spec 139, L4). So restaura o que FOI guardado: zero
+  // significa "nunca houve", e sobrescrever com zero apagaria o que o
+  // Pokemon tem agora. E o que faz um tera sobreviver a uma ida ao SwSh.
+  //
+  // Quem decide se o campo APARECE e o `Caps` do pkm_convert, no formato de
+  // destino — a memoria so garante que o dado nao se perdeu no caminho.
+  if (s->tera_type != 0) p.tera_type_original = s->tera_type;
+  if (s->dynamax_level != 0) p.dynamax_level = s->dynamax_level;
+  if (s->gmax) p.can_gigantamax = true;
+  if (s->alpha) p.is_alpha = true;
+  for (int i = 0; i < 6; ++i) {
+    if (s->effort_levels[i] != 0) p.effort_levels[i] = s->effort_levels[i];
   }
   return true;
 }
@@ -168,6 +217,34 @@ void Memory::Remember(const pkm::Pokemon& p, Game game) {
   Snapshot s;
   s.moves = p.moves;
   s.pp_ups = p.pp_ups;
+  // Mecanicas do jogo de onde ele esta saindo (spec 139). O destino pode nao
+  // ter o campo — e por isso que ele fica guardado aqui.
+  s.tera_type = p.tera_type_original;
+  s.dynamax_level = p.dynamax_level;
+  s.gmax = p.can_gigantamax;
+  s.alpha = p.is_alpha;
+  s.effort_levels = p.effort_levels;
+
+  // IDENTIDADE DE ORIGEM (spec 145): so no bucket do jogo de ONDE ele veio.
+  // Ela e do Pokemon, nao do jogo — grava-la em toda entrada duplicaria o
+  // dado em N lugares que poderiam divergir. `RestoreOnBank` a le do bucket
+  // de origem, que e o unico com autoridade sobre ela.
+  //
+  // A condicao e `OriginBucket(p) == game`: guardamos quando o Pokemon sai do
+  // jogo que o criou, que e o unico momento em que os campos ainda sao os
+  // verdadeiros. Depois de entrar no SwSh eles ja estao reescritos.
+  // O met 59996-60000 e a MARCA de que ja foi reescrito: guardar dali seria
+  // gravar o codigo do HOME como se fosse o local verdadeiro, e a restauracao
+  // devolveria lixo. So o registro ainda intacto tem autoridade.
+  const bool ja_reescrito =
+      p.met_location >= 59996 && p.met_location <= 60000;
+  if (!ja_reescrito && OriginBucket(p) == game) {
+    s.origin_game = p.origin_game;
+    s.met_location = p.met_location;
+    s.egg_location = p.egg_location;
+    s.ball = p.ball;
+  }
+
   for (auto& r : records_) {
     if (r.tracker == p.home_tracker && r.game == game) {
       r.snapshot = s;  // o ULTIMO moveset naquele jogo, nao o primeiro
@@ -207,12 +284,30 @@ std::vector<std::uint8_t> Encode(const Memory& m) {
     out.push_back(static_cast<std::uint8_t>((n >> (8 * i)) & 0xFF));
   }
   for (const auto& r : recs) {
-    PushU64(out, r.tracker);
-    out.push_back(static_cast<std::uint8_t>(r.game));
-    out.push_back(0);  // reserva: alinha a entrada e abre espaco para flag
-    for (int i = 0; i < 4; ++i) PushU16(out, r.snapshot.moves[i]);
-    for (int i = 0; i < 4; ++i) out.push_back(r.snapshot.pp_ups[i]);
-    out.push_back(0);  // padding para fechar em kEntryBytes
+    PushU64(out, r.tracker);                                    // 0..7
+    out.push_back(static_cast<std::uint8_t>(r.game));           // 8
+    // Byte 9: flags de 1 bit. Era a "reserva" que a v1 deixou — e o lugar
+    // que ela abriu de proposito para isto (spec 139).
+    std::uint8_t flags = 0;
+    if (r.snapshot.gmax) flags |= 0x01;
+    if (r.snapshot.alpha) flags |= 0x02;
+    out.push_back(flags);                                       // 9
+    for (int i = 0; i < 4; ++i) PushU16(out, r.snapshot.moves[i]);   // 10..17
+    for (int i = 0; i < 4; ++i) out.push_back(r.snapshot.pp_ups[i]); // 18..21
+    out.push_back(r.snapshot.tera_type);                        // 22
+    out.push_back(r.snapshot.dynamax_level);                    // 23
+    // 24..29: os GVs do PLA. Sao eles que nao cabiam nos 3 bytes livres da
+    // v1 e obrigaram a entrada a crescer.
+    for (int i = 0; i < 6; ++i) out.push_back(r.snapshot.effort_levels[i]);
+    out.push_back(0);  // 30..31: padding herdado da v2
+    out.push_back(0);
+    // 32..37: IDENTIDADE DE ORIGEM (v3, spec 145). O que o SwSh sobrescreve
+    // ao receber e nao tem como devolver sozinho.
+    out.push_back(r.snapshot.origin_game);                      // 32
+    PushU16(out, r.snapshot.met_location);                      // 33..34
+    PushU16(out, r.snapshot.egg_location);                      // 35..36
+    out.push_back(r.snapshot.ball);                             // 37
+    out.push_back(0);  // 38..39: padding, para a proxima extensao
     out.push_back(0);
   }
   return out;
@@ -226,15 +321,44 @@ bool Decode(const std::vector<std::uint8_t>& bytes, std::size_t offset,
   for (int i = 0; i < 4; ++i) {
     n |= static_cast<std::uint32_t>(bytes[offset + i]) << (8 * i);
   }
-  const std::size_t need = static_cast<std::size_t>(n) * kEntryBytes;
-  // Truncado: recusa. Ler a memoria pela metade daria moveset restaurado
-  // errado, que e pior que memoria vazia.
-  if (offset + 4 + need > bytes.size()) return false;
+  // MIGRACAO (spec 139): a entrada cresceu de 24 para 32 bytes. O tamanho nao
+  // esta gravado em lugar nenhum — a secao e "contador + n entradas" —, entao
+  // ele e DEDUZIDO do espaco disponivel.
+  //
+  // Sem isto, um banco gravado antes da 139 seria recusado por truncamento
+  // (`need` calculado com 32) e o dono PERDERIA a memoria inteira. E o TD-01
+  // da spec: um Decode errado aqui corrompe dado real.
+  const std::size_t disponivel = bytes.size() - (offset + 4);
+  std::size_t entry = kEntryBytes;
+  if (n > 0) {
+    const std::size_t precisa_novo = static_cast<std::size_t>(n) * kEntryBytes;
+    const std::size_t precisa_v2 = static_cast<std::size_t>(n) * kEntryBytesV2;
+    const std::size_t precisa_v1 = static_cast<std::size_t>(n) * kEntryBytesV1;
+    // A deducao e por IGUALDADE, nao por "cabe". Com `>=`, uma secao de 32
+    // bytes truncada em 4 sobraria com 28 — que ainda "cabe" em 24 — e seria
+    // lida como v1, aceitando dado corrompido em silencio. Um teste que ja
+    // existia (`memoria truncada recusa o arquivo`) pegou isto.
+    //
+    // A secao e o ULTIMO bloco do arquivo, entao `disponivel` bate exatamente
+    // com o tamanho gravado; sobra so quando ha lixo depois, que tambem nao
+    // deve ser aceito como se fosse a versao antiga.
+    if (disponivel == precisa_novo) {
+      entry = kEntryBytes;      // v3: com identidade de origem (spec 145)
+    } else if (disponivel == precisa_v2) {
+      entry = kEntryBytesV2;    // v2: spec 139, sem a identidade
+    } else if (disponivel == precisa_v1) {
+      entry = kEntryBytesV1;    // v1: anterior a spec 139
+    } else {
+      // Nao bate com nenhum dos dois: recusa. Ler a memoria pela metade daria
+      // moveset restaurado errado, que e pior que memoria vazia.
+      return false;
+    }
+  }
 
   std::vector<Record> recs;
   recs.reserve(n);
   for (std::uint32_t k = 0; k < n; ++k) {
-    const std::uint8_t* e = bytes.data() + offset + 4 + k * kEntryBytes;
+    const std::uint8_t* e = bytes.data() + offset + 4 + k * entry;
     Record r;
     r.tracker = ReadU64(e);
     const std::uint8_t g = e[8];
@@ -244,6 +368,25 @@ bool Decode(const std::vector<std::uint8_t>& bytes, std::size_t offset,
     r.game = static_cast<Game>(g);
     for (int i = 0; i < 4; ++i) r.snapshot.moves[i] = ReadU16(e + 10 + i * 2);
     for (int i = 0; i < 4; ++i) r.snapshot.pp_ups[i] = e[18 + i];
+    // Os campos da 139 so existem na entrada de 32 bytes. Numa entrada v1
+    // eles ficam ZERADOS, que e o mesmo que "este Pokemon nunca guardou nada
+    // disso" — nao ha valor sentinela a inventar.
+    if (entry >= kEntryBytesV2) {
+      r.snapshot.gmax = (e[9] & 0x01) != 0;
+      r.snapshot.alpha = (e[9] & 0x02) != 0;
+      r.snapshot.tera_type = e[22];
+      r.snapshot.dynamax_level = e[23];
+      for (int i = 0; i < 6; ++i) r.snapshot.effort_levels[i] = e[24 + i];
+    }
+    // A identidade de origem so existe na v3. Comparar com kEntryBytes (40)
+    // aqui e correto; usar a mesma constante no bloco acima faria a v2 perder
+    // os campos da 139 que ela TEM.
+    if (entry >= kEntryBytes) {
+      r.snapshot.origin_game = e[32];
+      r.snapshot.met_location = ReadU16(e + 33);
+      r.snapshot.egg_location = ReadU16(e + 35);
+      r.snapshot.ball = e[37];
+    }
     recs.push_back(r);
   }
   m->set_records(std::move(recs));

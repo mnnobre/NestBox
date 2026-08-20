@@ -1,6 +1,6 @@
 // Contagem de Pokedex sobre varias fontes (spec 026).
 //
-// Como box_move.h e box_sort.h, isto e logica pura — testavel por ctest sem
+// Como box_move.h, isto e logica pura — testavel por ctest sem
 // abrir janela.
 //
 // O motivo de existir: a dex contava so o save aberto e ignorava o NestBox,

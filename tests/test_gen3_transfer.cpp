@@ -140,6 +140,35 @@ int main() {
     }
   }
 
+  // --- AV de HP no LGPE (spec 136) ---------------------------------------
+  // O LGPE da 1 AV de HP por nivel ganho e EXIGE
+  // `AV_HP >= nivel_atual - met_level`. MEDIDO contra o PkHeX em
+  // tools/pkhex-ribbon-av (met=5 cur=46 -> piso 41). Este Pikachu e
+  // exatamente esse caso: met_level 5, nivel 46.
+  {
+    auto lgpe = g3x::ConvertUp(raw, pkm::Format::kPB7, ms::Game::kLgpe, nullptr);
+    Check(lgpe.has_value(), "[136] Pikachu converte para pb7 (LGPE)");
+    if (lgpe) {
+      const std::uint8_t delta =
+          static_cast<std::uint8_t>(level - lgpe->met_level);
+      Check(delta == 41, "[136] o caso e o da spec 129: nivel 46 - met 5 = 41");
+      Check(lgpe->awakening_values[0] >= delta,
+            "[136] AV_HP >= nivel - met_level (piso do LGPE)");
+      Check(lgpe->awakening_values[0] == delta,
+            "[136] AV_HP e exatamente o piso: nao inventa HP/CP alem do minimo");
+      // A regra e so do HP: os outros cinco AVs continuam zerados.
+      bool outros_zerados = true;
+      for (int i = 1; i < 6; ++i) {
+        if (lgpe->awakening_values[i] != 0) outros_zerados = false;
+      }
+      Check(outros_zerados, "[136] a regra so preenche o AV de HP");
+    }
+
+    // Destino que nao e LGPE nao ganha AV nenhum.
+    Check(up->awakening_values[0] == 0,
+          "[136] subida para pk9 nao mexe em AV (campo so existe no LGPE)");
+  }
+
   // --- Recusas -------------------------------------------------------------
   {
     g3::FullRecord egg = Pikachu();
@@ -215,6 +244,78 @@ int main() {
     ls::MovesAtLevel(ls::Game::kFireRed, 25, 0, level, esperado);
     Check(full && std::memcmp(full->moves, esperado, sizeof(esperado)) == 0,
           "sem memoria, moveset e o learnset do FireRed no nivel");
+  }
+
+  // --- Ribbons do gen3 sobem (L6, spec 138) ------------------------------
+  // O mapa foi MEDIDO contra o EntityConverter do PkHeX em tools/pkhex-138.
+  // O caso replica exatamente a entrada da sonda:
+  //   ChampionG3 + Artist + Effort + Winning + Victory, e os contadores de
+  //   concurso Cool=4, Beauty=3, Cute=1.
+  // O PkHeX devolveu: [RibbonArtist, RibbonChampionG3, RibbonEffort] ligados,
+  // RibbonCountMemoryContest=8 e RibbonCountMemoryBattle=2.
+  {
+    g3::FullRecord com_ribbons = Pikachu();
+    com_ribbons.ribbons = 0;
+    com_ribbons.ribbons |= 4u << 0;   // Cool   = 4
+    com_ribbons.ribbons |= 3u << 3;   // Beauty = 3
+    com_ribbons.ribbons |= 1u << 6;   // Cute   = 1
+    com_ribbons.ribbons |= 1u << 15;  // ChampionG3
+    com_ribbons.ribbons |= 1u << 16;  // Winning (torre)
+    com_ribbons.ribbons |= 1u << 17;  // Victory (torre)
+    com_ribbons.ribbons |= 1u << 18;  // Artist
+    com_ribbons.ribbons |= 1u << 19;  // Effort
+    // A sonda imprimiu o u32 da mesma entrada como "5C 80 0F 00" (LE).
+    Check(com_ribbons.ribbons == 0x000F805Cu,
+          "u32 gen3 montado bate com o medido na sonda (0x000F805C)");
+
+    std::uint8_t raw_r[80];
+    g3::EncodeFullRecord(com_ribbons, raw_r);
+    ms::Memory mem_r;
+    auto sobe = g3x::ConvertUp(raw_r, pkm::Format::kPK9, ms::Game::kSV, &mem_r);
+    Check(sobe.has_value(), "gen3 com ribbons sobe");
+    if (sobe) {
+      // Individuais: indice = byte medido - 52.
+      Check((sobe->ribbon_bytes[0] & (1u << 1)) != 0,
+            "Champion Ribbon (Hoenn) chega ao moderno (byte 52 bit 1)");
+      Check((sobe->ribbon_bytes[2] & (1u << 2)) != 0,
+            "Artist Ribbon chega ao moderno (byte 54 bit 2)");
+      Check((sobe->ribbon_bytes[0] & (1u << 7)) != 0,
+            "Effort Ribbon chega ao moderno (byte 52 bit 7)");
+      // Consolidacao: concurso e SOMA (4+3+1=8).
+      Check(sobe->ribbon_count_memory == 8,
+            "Contest Memory Ribbon com contador 8 (soma dos contadores)");
+      // Os de torre NAO viram bit individual — sao contagem.
+      Check((sobe->ribbon_bytes[4] & 0x03) == 0,
+            "Winning/Victory nao viram bit individual (viram contagem)");
+      // Torre e CONTAGEM (Winning + Victory = 2), regra diferente da do
+      // concurso, que e SOMA. O campo so passou a existir com a spec 136 —
+      // ate la o valor era calculado e descartado (TD-03 da spec 138).
+      Check(sobe->ribbon_count_battle == 2,
+            "Battle Memory Ribbon com contador 2 (contagem, nao soma)");
+      // Nada ligado fora do medido: os bytes de marks (64..71) ficam limpos.
+      bool marks_limpas = true;
+      for (int i = 8; i < 16; ++i) {
+        if (sobe->ribbon_bytes[i] != 0) marks_limpas = false;
+      }
+      Check(marks_limpas, "nenhuma mark inventada na subida do gen3");
+    }
+
+    // Sem ribbons no gen3, nada aparece no moderno (nao inventamos curriculo).
+    g3::FullRecord sem = Pikachu();
+    sem.ribbons = 0;
+    std::uint8_t raw_s[80];
+    g3::EncodeFullRecord(sem, raw_s);
+    ms::Memory mem_s;
+    auto limpo = g3x::ConvertUp(raw_s, pkm::Format::kPK9, ms::Game::kSV, &mem_s);
+    Check(limpo.has_value(), "gen3 sem ribbons sobe");
+    if (limpo) {
+      bool tudo_zero = limpo->ribbon_count_memory == 0 &&
+                       limpo->ribbon_count_battle == 0;
+      for (int i = 0; i < 16; ++i) {
+        if (limpo->ribbon_bytes[i] != 0) tudo_zero = false;
+      }
+      Check(tudo_zero, "gen3 sem ribbons chega sem ribbon nenhum");
+    }
   }
 
   // Recusas da descida.

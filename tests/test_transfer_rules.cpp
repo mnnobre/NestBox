@@ -637,6 +637,210 @@ void TestPk9UsaDexNacional() {
             ") — se cair a zero, este teste virou decorativo");
 }
 
+// Paridade de bloqueios com o HOME (spec 135). As lacunas vieram da
+// pesquisa de mecanicas por jogo (docs/pesquisa-mecanicas-por-jogo.md).
+static void TestParidadeSpec135() {
+  std::printf("=== spec 135: paridade de bloqueios ===\n");
+  const tr::SaveContext kEmpty{};
+
+  // SV: Gmax que ainda evolui NAO entra — Pikachu(25), Meowth(52),
+  // Eevee(133), Duraludon(884), a lista do HOME v3.2.1.
+  for (std::uint16_t dex : {25, 52, 133, 884}) {
+    pkm::Pokemon g = Mon(dex);
+    g.can_gigantamax = true;
+    CheckBlocked(tr::CanTransfer(g, cp::Game::kScarletViolet, kEmpty),
+                 "Gmax " + std::to_string(dex) + " nao entra no SV");
+  }
+  // Contra-caso 1: os MESMOS sem a flag entram.
+  CheckAllowed(tr::CanTransfer(Mon(25), cp::Game::kScarletViolet, kEmpty),
+               "Pikachu sem Gmax entra no SV");
+  // Contra-caso 2: Gmax de especie FINAL entra (Charizard 6) — a flag fica
+  // retida, inerte; o HOME so bloqueia quem evolui.
+  {
+    pkm::Pokemon zard = Mon(6);
+    zard.can_gigantamax = true;
+    CheckAllowed(tr::CanTransfer(zard, cp::Game::kScarletViolet, kEmpty),
+                 "Charizard Gmax (final) entra no SV");
+  }
+
+  // BDSP: o Nincada(290) era bloqueado pela spec 135 (paridade cega com o
+  // HOME) e foi LIBERADO pela 141 — o bloqueio oficial e politica
+  // anti-clonagem, e o BDSP tem as tres especies da linha nos dados.
+  // O caso virou CONTRA-caso: ele entra de qualquer origem.
+  {
+    pkm::Pokemon nin = Mon(290);
+    nin.origin_game = 44;  // SwSh
+    CheckAllowed(tr::CanTransfer(nin, cp::Game::kBdsp, kEmpty),
+                 "Nincada de FORA entra no BDSP (spec 141: o jogo o tem)");
+    nin.origin_game = 48;  // BD
+    CheckAllowed(tr::CanTransfer(nin, cp::Game::kBdsp, kEmpty),
+                 "Nincada do proprio BDSP tambem, claro");
+    nin.origin_game = 44;
+    CheckAllowed(tr::CanTransfer(nin, cp::Game::kSwordShield, kEmpty),
+                 "Nincada entra no SwSh normalmente");
+    // A trava que CONTINUA valendo e a tecnica: no SV a especie nao existe.
+    CheckBlocked(tr::CanTransfer(nin, cp::Game::kScarletViolet, kEmpty),
+                 "Nincada NAO entra no SV — ali a especie nao existe (tecnico)");
+  }
+
+  // Spinda: o bloqueio da spec 135 foi REVERTIDO na spec 137 (DEC-2 do dono).
+  // Ver TestSpindaLiberadoSpec137.
+}
+
+
+// ---------------------------------------------------------------------------
+// spec 137 - L5: o portao confere ESPECIE **E FORMA**.
+//
+// Todo caso tem contra-caso: uma regra que bloqueia tudo "passa" sem provar
+// nada. Aqui o contra-caso e sempre a MESMA especie na forma base, que tem de
+// continuar entrando - se ela quebrar, o bloqueio nao e da forma, e da
+// especie, e a regra nova nao esta fazendo o que diz.
+//
+// Todos os vereditos abaixo saem da tabela MEDIDA contra o PkHeX
+// (PersonalTable.X.IsPresentInGame), nunca de texto pesquisado.
+// ---------------------------------------------------------------------------
+static void TestPortaoPorFormaSpec137() {
+  std::printf("=== spec 137: o portao confere a FORMA ===\n");
+  const tr::SaveContext kEmpty{};
+
+  // O caso da pesquisa: o BDSP tem Vulpix(37), mas nao tem a forma de Alola.
+  CheckBlocked(tr::CanTransfer(Mon(37, 1), cp::Game::kBdsp, kEmpty),
+               "Alolan Vulpix NAO entra no BDSP");
+  // CONTRA-CASO: o Vulpix normal entra. Sem ele, "bloqueia tudo" passaria.
+  CheckAllowed(tr::CanTransfer(Mon(37, 0), cp::Game::kBdsp, kEmpty),
+               "Vulpix normal ENTRA no BDSP");
+  // E a forma de Alola entra onde ela existe (SwSh e SV) - prova que o
+  // bloqueio e por DESTINO, nao "forma 1 e proibida".
+  CheckAllowed(tr::CanTransfer(Mon(37, 1), cp::Game::kSwordShield, kEmpty),
+               "Alolan Vulpix entra no SwSh");
+  CheckAllowed(tr::CanTransfer(Mon(37, 1), cp::Game::kScarletViolet, kEmpty),
+               "Alolan Vulpix entra no SV");
+
+  // Zorua de Hisui(570 forma 1): o SwSh tem Zorua, mas nao a forma de Hisui.
+  CheckBlocked(tr::CanTransfer(Mon(570, 1), cp::Game::kSwordShield, kEmpty),
+               "Hisuian Zorua NAO entra no SwSh");
+  CheckAllowed(tr::CanTransfer(Mon(570, 0), cp::Game::kSwordShield, kEmpty),
+               "Zorua normal ENTRA no SwSh");
+  // CONTRA-CASOS: onde a forma de Hisui existe, ela entra.
+  CheckAllowed(tr::CanTransfer(Mon(570, 1), cp::Game::kLegendsArceus, kEmpty),
+               "Hisuian Zorua entra no PLA");
+  CheckAllowed(tr::CanTransfer(Mon(570, 1), cp::Game::kScarletViolet, kEmpty),
+               "Hisuian Zorua entra no SV");
+  // O avesso, medido: no PLA existe SO a forma de Hisui - o Zorua de Unova
+  // nao entra. Prova que a tabela nao e "forma 0 sempre vale".
+  CheckBlocked(tr::CanTransfer(Mon(570, 0), cp::Game::kLegendsArceus, kEmpty),
+               "Zorua de Unova (forma 0) NAO entra no PLA");
+  // Idem Growlithe(58): o PLA so tem o de Hisui.
+  CheckBlocked(tr::CanTransfer(Mon(58, 0), cp::Game::kLegendsArceus, kEmpty),
+               "Growlithe de Kanto NAO entra no PLA");
+  CheckAllowed(tr::CanTransfer(Mon(58, 1), cp::Game::kLegendsArceus, kEmpty),
+               "Hisuian Growlithe entra no PLA");
+
+  // Tauros de Paldea(128 forma 1): o SwSh TEM Tauros, entao so o portao novo
+  // pode barra-lo. Este caso e o mais forte da bateria — o "Galarian Ponyta
+  // no SV" que estava aqui antes passava pelo motivo ERRADO (o SV nem tem
+  // Ponyta, entao o portao velho, por especie, ja o barrava; o teste
+  // continuaria verde com a regra nova apagada).
+  CheckBlocked(tr::CanTransfer(Mon(128, 1), cp::Game::kSwordShield, kEmpty),
+               "Paldean Tauros NAO entra no SwSh (que TEM Tauros)");
+  CheckAllowed(tr::CanTransfer(Mon(128, 0), cp::Game::kSwordShield, kEmpty),
+               "Tauros normal ENTRA no SwSh");
+  CheckAllowed(tr::CanTransfer(Mon(128, 1), cp::Game::kScarletViolet, kEmpty),
+               "Paldean Tauros entra no SV");
+
+  // Formas NAO-regionais tambem valem: o BDSP tem as 27 do Unown e as 5 do
+  // Rotom, entao elas passam. Se a regra so soubesse de regionais, isto
+  // quebraria.
+  CheckAllowed(tr::CanTransfer(Mon(201, 26), cp::Game::kBdsp, kEmpty),
+               "Unown forma 26 entra no BDSP");
+  CheckAllowed(tr::CanTransfer(Mon(479, 5), cp::Game::kBdsp, kEmpty),
+               "Rotom forma 5 entra no BDSP");
+  // E uma forma inexistente da MESMA especie e barrada: o Unown tem 28
+  // formas (0..27), a 28 nao existe em jogo nenhum.
+  CheckBlocked(tr::CanTransfer(Mon(201, 28), cp::Game::kBdsp, kEmpty),
+               "Unown forma 28 (inexistente) NAO entra no BDSP");
+
+  // Jogo pre-Switch nao tem tabela de forma medida: o portao nao pode barrar
+  // por falta de dado. Vulpix entra no Emerald normalmente.
+  CheckAllowed(tr::CanTransfer(Mon(37, 0), cp::Game::kEmerald, kEmpty),
+               "sem tabela medida (Emerald), a forma nao bloqueia");
+}
+
+// ---------------------------------------------------------------------------
+// spec 137 - DEC-2: Spinda LIBERADO.
+//
+// A spec 135 bloqueava Spinda no BDSP copiando o HOME. O dono decidiu o
+// contrario com a pesquisa: as pintas saem do encryption constant/PID, que
+// todo formato moderno carrega, e o bug das "pintas iguais" do HOME 3.0.0 era
+// VISUAL (corrigido no 3.0.1) - o dado nunca se perdeu.
+// ---------------------------------------------------------------------------
+static void TestSpindaLiberadoSpec137() {
+  std::printf("=== spec 137: Spinda liberado (DEC-2) ===\n");
+  const tr::SaveContext kEmpty{};
+
+  CheckAllowed(tr::CanTransfer(Mon(327), cp::Game::kBdsp, kEmpty),
+               "Spinda ENTRA no BDSP (bloqueio da spec 135 revertido)");
+  CheckAllowed(tr::CanTransfer(Mon(327), cp::Game::kEmerald, kEmpty),
+               "Spinda entra no Emerald");
+
+  // CONTRA-CASO: onde o jogo NAO tem a especie, o portao geral ja barra -
+  // e por isso a regra propria do Spinda nao faz falta. Medido: das 6
+  // modernas, so o BDSP tem Spinda nos dados.
+  CheckBlocked(tr::CanTransfer(Mon(327), cp::Game::kSwordShield, kEmpty),
+               "Spinda nao entra no SwSh (o portao por especie barra)");
+  CheckBlocked(tr::CanTransfer(Mon(327), cp::Game::kScarletViolet, kEmpty),
+               "Spinda nao entra no SV (o portao por especie barra)");
+  CheckBlocked(tr::CanTransfer(Mon(327), cp::Game::kLegendsArceus, kEmpty),
+               "Spinda nao entra no PLA (o portao por especie barra)");
+}
+
+// ---------------------------------------------------------------------------
+// spec 137 - DEC-2: Hyper Training por JOGO.
+//
+// O SV aceita a partir do nivel 50; os demais que tem a mecanica exigem 100.
+// Antes havia um "100" fixo dentro da regra do BDSP.
+// ---------------------------------------------------------------------------
+static void TestHyperTrainingPorJogoSpec137() {
+  std::printf("=== spec 137: Hyper Training por jogo (DEC-2) ===\n");
+
+  auto ht = Mon(25);  // Pikachu, presente em todos os destinos usados aqui
+  ht.hyper_trained[0] = true;
+
+  tr::SaveContext lv49; lv49.level = 49;
+  tr::SaveContext lv50; lv50.level = 50;
+  tr::SaveContext lv99; lv99.level = 99;
+  tr::SaveContext lv100; lv100.level = 100;
+
+  // SV: a barreira e 50. O par 49/50 fixa a BORDA - sem ele, "50 passa" nao
+  // distingue a regra nova de nenhuma regra.
+  CheckBlocked(tr::CanTransfer(ht, cp::Game::kScarletViolet, lv49),
+               "Hyper Training lv49 NAO entra no SV");
+  CheckAllowed(tr::CanTransfer(ht, cp::Game::kScarletViolet, lv50),
+               "Hyper Training lv50 ENTRA no SV (a regra nova)");
+
+  // BDSP e SwSh: continuam em 100, e a borda 99/100 prova que sao 100 mesmo.
+  CheckBlocked(tr::CanTransfer(ht, cp::Game::kBdsp, lv99),
+               "Hyper Training lv99 NAO entra no BDSP");
+  CheckAllowed(tr::CanTransfer(ht, cp::Game::kBdsp, lv100),
+               "Hyper Training lv100 entra no BDSP");
+  CheckBlocked(tr::CanTransfer(ht, cp::Game::kSwordShield, lv50),
+               "Hyper Training lv50 NAO entra no SwSh (exige 100)");
+  CheckAllowed(tr::CanTransfer(ht, cp::Game::kSwordShield, lv100),
+               "Hyper Training lv100 entra no SwSh");
+
+  // CONTRA-CASO obrigatorio: sem a flag, o lv49 passa em toda parte. Sem
+  // isto, um bloqueio geral por nivel se disfarcaria de regra de HT.
+  CheckAllowed(tr::CanTransfer(Mon(25), cp::Game::kScarletViolet, lv49),
+               "sem Hyper Training, lv49 entra no SV");
+  CheckAllowed(tr::CanTransfer(Mon(25), cp::Game::kBdsp, lv49),
+               "sem Hyper Training, lv49 entra no BDSP");
+
+  // Destino sem a mecanica (pre-gen7) nao barra: a flag nem viaja para la.
+  CheckAllowed(tr::CanTransfer(ht, cp::Game::kEmerald, lv49),
+               "Hyper Training lv49 entra no Emerald (sem a mecanica)");
+}
+
+
 int main() {
   std::printf("regras de transferencia (spec 070)\n\n");
 
@@ -655,6 +859,10 @@ int main() {
   TestFusoes();
   TestLevelFromExp();
   TestPk9UsaDexNacional();
+  TestParidadeSpec135();
+  TestPortaoPorFormaSpec137();
+  TestSpindaLiberadoSpec137();
+  TestHyperTrainingPorJogoSpec137();
 
   std::printf("\n%s\n", g_failures == 0 ? "TUDO OK"
                                         : "FALHAS ACIMA");

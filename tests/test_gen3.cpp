@@ -3,6 +3,7 @@
 // Os testes que dependem de um save real sao pulados se o arquivo nao existir,
 // para o teste continuar util em maquina sem o save.
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -70,6 +71,59 @@ void TestRejectsGarbage() {
 
   std::vector<std::uint8_t> tiny(100, 0);
   Check(!g3::ParseSave(tiny).has_value(), "arquivo pequeno demais");
+
+  // Menos de UM slot nao pode passar. Esta trava e o que sobrou da protecao
+  // depois da correcao de 2026-08-20: o limite de busca desceu de kSaveSize
+  // para kSlotSize, entao e aqui que se prova que ele nao desceu demais.
+  std::vector<std::uint8_t> meio_slot(g3::kSlotSize / 2, 0xAB);
+  Check(!g3::ParseSave(meio_slot).has_value(), "menor que um slot");
+}
+
+// Save com UM SLOT SO — o estado de quem salvou uma vez.
+//
+// O gen3 alterna os dois slots a cada gravacao. Num jogo pouco jogado o
+// slot A nunca foi escrito e fica em 0xFF; a primeira signature aparece so
+// em 0xE000. O NestBox RECUSAVA esse save por duas razoes empilhadas:
+//
+//   FindSaveOffset exigia `base + kSaveSize` dentro do arquivo, e com base
+//   em 0xE000 isso estoura os 128 KB;
+//   ParseSave exigia os DOIS slots parseaveis (`if (!a || !b)`), apesar de
+//   ja ter, logo abaixo, o desempate para "so um completo".
+//
+// Medido no save real que o dono gerou no mGBA: 14 signatures em vez de 28.
+// Era bug de PRODUTO — qualquer FireRed recem-comecado seria recusado.
+void TestUmSlotSo() {
+  std::printf("save com um slot so:\n");
+
+  // Monta um save de 128 KB com o slot A virgem (0xFF) e o B valido.
+  std::vector<std::uint8_t> file(131072, 0xFF);
+  const std::size_t base_b = g3::kSlotSize;  // 0xE000
+  for (std::size_t i = 0; i < 14; ++i) {
+    std::uint8_t* sec = file.data() + base_b + i * g3::kSectionSize;
+    std::fill(sec, sec + g3::kSectionSize, std::uint8_t{0});
+    // id da secao, save index e a signature que o parser procura
+    sec[0x0FF4] = static_cast<std::uint8_t>(i);
+    sec[0x0FF5] = 0;
+    sec[0x0FF8] = 0x25; sec[0x0FF9] = 0x20;
+    sec[0x0FFA] = 0x01; sec[0x0FFB] = 0x08;
+    sec[0x0FFC] = 1;
+    // checksum coerente com os dados zerados
+    const std::uint16_t ck = 0;
+    sec[0x0FF6] = static_cast<std::uint8_t>(ck & 0xFF);
+    sec[0x0FF7] = static_cast<std::uint8_t>(ck >> 8);
+  }
+  const auto sf = g3::ParseSave(file);
+  Check(sf.has_value(), "save com so o segundo slot parseia");
+  if (sf) {
+    // `FindSaveOffset` ancora a BASE na primeira signature que acha, entao o
+    // slot preenchido vira o "A" do parser mesmo estando em 0xE000 no
+    // arquivo. O que importa e que o slot ativo tenha as 14 secoes — nao o
+    // rotulo. Medido no save real do mGBA: base=57344, A.complete=1 com 14
+    // secoes, B vazio.
+    const auto& ativo = sf->active_slot == 1 ? sf->slot_b : sf->slot_a;
+    Check(ativo.complete, "o slot ativo esta completo");
+    Check(ativo.sections.size() == 14, "o slot ativo tem as 14 secoes");
+  }
 }
 
 void TestSpeciesNames() {
@@ -841,6 +895,7 @@ void TestDetectGame(const std::vector<std::uint8_t>& file, const char* label) {
 int main(int argc, char** argv) {
   TestChecksum();
   TestRejectsGarbage();
+  TestUmSlotSo();
   TestSpeciesNames();
   TestNationalDex();
   TestPersonal();

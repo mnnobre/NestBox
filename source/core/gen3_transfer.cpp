@@ -23,6 +23,71 @@ std::string UpperAscii(std::string s) {
   return s;
 }
 
+// --- Ribbons gen3 -> bitfield moderno (L6, spec 138) ----------------------
+//
+// TODOS os offsets abaixo foram MEDIDOS pela sonda `tools/pkhex-138`, que
+// liga cada propriedade do PKHeX.Core e faz o XOR do buffer para observar o
+// bit que mudou. Nada aqui e citado de documentacao.
+//
+// O u32 gen3 (`FullRecord::ribbons`) tem dois formatos misturados:
+//   bits  0..14  -> CINCO contadores de 3 bits (concurso: cool, beauty,
+//                   cute, smart, tough), cada um 0..4
+//   bits 15..31  -> bools individuais
+//
+// `ribbon_bytes` do nosso modelo cobre os offsets 52..59 (indices 0..7) e
+// 64..71 (indices 8..15) do binario moderno. Todo alvo aqui cai em 52..59,
+// entao indice = byte - 52.
+void ApplyGen3Ribbons(std::uint32_t r, pkm::Pokemon& p) {
+  // Contadores de concurso: 3 bits cada, a partir do bit 0.
+  // Medido: Cool=4 + Beauty=3 + Cute=1 -> RibbonCountMemoryContest = 8.
+  // A regra e a SOMA dos cinco contadores (nao a contagem de categorias).
+  int contest = 0;
+  for (int i = 0; i < 5; ++i) contest += static_cast<int>((r >> (i * 3)) & 0x7);
+
+  // Bools individuais. `bit` e a posicao no u32 gen3; `byte`/`mask` sao o
+  // destino medido no binario moderno.
+  struct Map {
+    std::uint8_t bit;   // no u32 gen3
+    std::uint8_t byte;  // no binario moderno (52..59)
+    std::uint8_t mask;
+  };
+  static constexpr Map kIndividuais[] = {
+      {15, 52, 1u << 1},  // ChampionG3 (Hoenn)  — PK3 byte 77 bit 7
+      {18, 54, 1u << 2},  // Artist              — PK3 byte 78 bit 2
+      {19, 52, 1u << 7},  // Effort              — PK3 byte 78 bit 3
+      {20, 56, 1u << 1},  // ChampionBattle      — PK3 byte 78 bit 4
+      {21, 56, 1u << 2},  // ChampionRegional    — PK3 byte 78 bit 5
+      {22, 56, 1u << 3},  // ChampionNational    — PK3 byte 78 bit 6
+      {23, 54, 1u << 6},  // Country             — PK3 byte 78 bit 7
+      {24, 54, 1u << 7},  // National            — PK3 byte 79 bit 0
+      {25, 55, 1u << 0},  // Earth               — PK3 byte 79 bit 1
+      {26, 55, 1u << 1},  // World               — PK3 byte 79 bit 2
+  };
+  for (const Map& m : kIndividuais) {
+    if ((r >> m.bit) & 1) p.ribbon_bytes[m.byte - 52] |= m.mask;
+  }
+
+  // Torre: Winning (bit 16) e Victory (bit 17) NAO viram bit individual —
+  // viram CONTAGEM no Battle Memory Ribbon. Medido: os dois ligados -> 2.
+  // Regra diferente da do concurso, porque no gen3 o concurso ja era um
+  // contador por categoria e a torre era um bool por conquista.
+  int battle = 0;
+  if ((r >> 16) & 1) ++battle;
+  if ((r >> 17) & 1) ++battle;
+
+  // Os DOIS contadores: byte 60 (contest) e byte 61 (battle). O segundo era
+  // o TD-03 desta spec — quando ela rodou, o `pkm_model.h` ainda tinha um
+  // campo so, e o valor ficava calculado e descartado. A spec 136 (paralela)
+  // provou que o byte 61 era um campo independente que o app perdia na
+  // conversao entre formatos, e criou `ribbon_count_battle`. Ligado aqui.
+  if (contest > 0) {
+    p.ribbon_count_memory = static_cast<std::uint8_t>(contest);
+  }
+  if (battle > 0) {
+    p.ribbon_count_battle = static_cast<std::uint8_t>(battle);
+  }
+}
+
 }  // namespace
 
 std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
@@ -109,11 +174,23 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
     if (full->markings & (1u << i)) p.markings |= 1u << (2 * i);
   }
 
-  // Tera ao entrar no pk9: derivado do tipo primario, como o Convert entre
-  // formatos modernos ja faz (conferido contra o PkHeX na spec 069).
+  // --- Ribbons do gen3 (L6, spec 138) ------------------------------------
+  // Sem isto o Pokemon de GBA chega ao Switch "sem curriculo". O mapa e
+  // MEDIDO contra o EntityConverter do PkHeX (`tools/pkhex-138`), nunca
+  // chutado — a conversao direta PK3->PK9 e o caminho oficial por etapas
+  // (PK3->PK4->PK5->PK6->PK7->PK8->PK9) dao o mesmo resultado.
+  //
+  // O gen5->gen6 (Poke Transporter) CONSOLIDA: os ribbons de concurso viram
+  // UM Contest Memory Ribbon e os de torre UM Battle Memory Ribbon, cada um
+  // com contador. Os demais seguem individuais.
+  ApplyGen3Ribbons(full->ribbons, p);
+
+  // Tera ao entrar no pk9: o mesmo `TeraOnEntry` do Convert entre formatos
+  // modernos. Nao e o tipo primario e sim o tipo que NAO e Normal — medido em
+  // todas as 733 do SV (spec 145); a regra `== Type1` da 069 vinha de uma
+  // amostra de 10 sem nenhum Normal/X.
   if (destino == pkm::Format::kPK9) {
-    const std::uint8_t t1 = species::Type1(dex);
-    p.tera_type_original = t1 == 0xFF ? 0 : t1;
+    p.tera_type_original = species::TeraOnEntry(dex);
     p.tera_type_override = p.tera_type_original;
   }
 
@@ -153,46 +230,29 @@ std::optional<pkm::Pokemon> ConvertUp(const std::uint8_t raw[80],
   p.hp_current = species::MaxHp(dex, p.ivs[0], p.evs[0], level);
   p.status_condition = 0;
 
-  // Nivel de obediencia acompanha o nivel (spec 120): nos nativos do Z-A os
-  // dois sao iguais, e o verify acusa "Invalid Obedience Level" quando fica
-  // zerado. Vale para todo destino pk9 (SV usa o mesmo campo).
-  if (destino == pkm::Format::kPK9) p.obedience_level = level;
+  // O nivel de obediencia (PK9) e as plus flags do Z-A saiam daqui na spec
+  // 145: dependem do JOGO de destino, e esta funcao so conhece o FORMATO.
+  // Agora vivem em `commit::AplicaEntradaNoDestino`, por onde toda entrada
+  // passa — inclusive o gerador de lote, que nao percorre esta rota.
 
-  // Plus flags do Z-A (spec 122): o jogo exige a flag de CADA golpe que o
-  // Pokemon ja conhece pelo learnset ate o nivel dele — nao so dos quatro
-  // equipados. Sem elas o Z-A nao monta o registro e desenha um OVO: foi o
-  // Rayquaza nivel 100 do dono, com 13 golpes cobrados.
+  // AV de HP no LGPE (spec 136). O LGPE da 1 AV de HP por nivel GANHO, entao
+  // ele exige `AV_HP >= nivel_atual - met_level`. MEDIDO contra o PkHeX em
+  // tools/pkhex-ribbon-av: o piso e exatamente o delta (met=5 cur=46 -> 41;
+  // met=1 cur=100 -> 99; delta 0 -> piso 0).
   //
-  // (A spec 120 tinha descartado as flags olhando um Pidgey nivel 3, que mal
-  // aprendeu golpes e por isso tem zero — conclusao apressada, corrigida
-  // aqui contra o save real.)
-  if (dest_ms == moveset::Game::kZA) {
-    // O bit NAO e indexado pelo id do golpe: e a POSICAO dele na lista
-    // PlusMoveIndexes da especie (za_plus.h, gerado do PkHeX). Guardamos os
-    // ids aqui; o writer do pk9 traduz para o bit.
-    p.za_plus_moves.clear();
-    const learnset::Entry* e = nullptr;
-    std::size_t n = 0;
-    if (learnset::Find(learnset::Game::kZA, dex, p.form, &e, &n)) {
-      for (std::size_t i = 0; i < n; ++i) {
-        if (e[i].level == 0 || e[i].level > level) continue;
-        p.za_plus_moves.push_back(e[i].move);
-      }
-    }
-    // Os equipados so entram se JA estiverem na lista do learnset ate o
-    // nivel: ligar a flag de um golpe que o Pokemon ainda nao aprenderia
-    // produz "Multiple Plus Move flags are invalid" (medido no PkHeX).
-    for (int i = 0; i < 4; ++i) {
-      const std::uint16_t mv = p.moves[i];
-      if (!mv) continue;
-      bool ja = false;
-      for (const std::uint16_t x : p.za_plus_moves) {
-        if (x == mv) { ja = true; break; }
-      }
-      if (!ja) p.za_plus_moves.push_back(mv);
-    }
-    p.za_plus_dex = dex;  // a lista de bits e por especie
+  // O `met_level` vem copiado do registro gen3 (linha ~84), entao um gen3
+  // capturado no nivel 5 e criado ate 46 chegaria ILEGAL: o LegalityAnalysis
+  // acusa "HP AV should be greater than 41" (medido na spec 129).
+  //
+  // Preenche o MINIMO que satisfaz a regra, e so quando o valor atual for
+  // menor — o AV soma DIRETO no stat (spec 129), entao encher alem do minimo
+  // inventaria HP e CP que o Pokemon nao teve, e rebaixar um AV maior que ja
+  // veio seria perda de dado.
+  if (destino == pkm::Format::kPB7 && level > p.met_level) {
+    const std::uint8_t piso = static_cast<std::uint8_t>(level - p.met_level);
+    if (p.awakening_values[0] < piso) p.awakening_values[0] = piso;
   }
+
 
   // Altura e peso ABSOLUTOS (spec 121): so PA8 e PB7 os guardam, e o
   // verificador do PkHeX recalcula e compara. Formula conferida contra o

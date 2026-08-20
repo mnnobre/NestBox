@@ -283,6 +283,62 @@ int main() {
           "Convert para o proprio formato preserva o raw (regra da spec 063)");
   }
 
+  // --- L3 (spec 138): o alpha vira Alpha Mark ao sair do PA8 -------------
+  // Medido em tools/pkhex-138 contra o EntityConverter do PkHeX:
+  //   ConvertToType(PA8 com IsAlpha -> PK9) = Success, ligadas [RibbonMarkAlpha]
+  //   RibbonMarkAlpha vive no byte 69 bit 3 -> ribbon_bytes[13] & 0x08
+  //   PA8 ALPHA scale=0 e scale=128 saem os DOIS com PK9 scale=255
+  // O converter NAO liga Jumbo nem Mini (bloco A4) — nao as inventamos.
+  {
+    pkm::Pokemon alpha;
+    alpha.format = pkm::Format::kPA8;
+    alpha.species = 445;  // Garchomp, o mesmo da sonda
+    alpha.is_alpha = true;
+    alpha.scale = 128;    // deliberadamente != 255, para provar o forcamento
+
+    const auto no_sv = pkm::Convert(alpha, pkm::Format::kPK9);
+    Check(no_sv.has_value(), "alpha do PLA converte para PK9");
+    if (no_sv) {
+      Check((no_sv->ribbon_bytes[13] & 0x08) != 0,
+            "alpha vira Alpha Mark no PK9 (byte 69 bit 3)");
+      Check(!no_sv->is_alpha,
+            "o bit is_alpha continua zerado fora do PA8 (o PK9 nao o tem)");
+      Check(no_sv->scale == 255,
+            "alpha forca scale 255 no PK9, como o converter do PkHeX faz");
+      Check((no_sv->ribbon_bytes[12] & 0x20) == 0,
+            "Jumbo Mark NAO e inventada pelo alpha (o converter nao a liga)");
+      Check((no_sv->ribbon_bytes[12] & 0x40) == 0,
+            "Mini Mark NAO e inventada pelo alpha");
+    }
+
+    // Nao-alpha: nada de mark, e o scale fica como veio.
+    pkm::Pokemon comum = alpha;
+    comum.is_alpha = false;
+    const auto comum_sv = pkm::Convert(comum, pkm::Format::kPK9);
+    Check(comum_sv.has_value(), "nao-alpha do PLA converte para PK9");
+    if (comum_sv) {
+      Check((comum_sv->ribbon_bytes[13] & 0x08) == 0,
+            "nao-alpha NAO ganha Alpha Mark");
+      Check(comum_sv->scale == 128,
+            "nao-alpha preserva o scale original");
+    }
+
+    // Destino sem bitfield de marks (PB7): a mark nao tem onde morar e o
+    // `Caps` zera o bitfield inteiro — nao pode sobrar lixo.
+    pkm::Pokemon so_alpha;
+    so_alpha.format = pkm::Format::kPA8;
+    so_alpha.species = 25;
+    so_alpha.is_alpha = true;
+    const auto no_lgpe = pkm::Convert(so_alpha, pkm::Format::kPB7);
+    if (no_lgpe) {
+      bool limpo = true;
+      for (int i = 0; i < 16; ++i) {
+        if (no_lgpe->ribbon_bytes[i] != 0) limpo = false;
+      }
+      Check(limpo, "destino sem bitfield de marks nao recebe a Alpha Mark");
+    }
+  }
+
   const std::filesystem::path fixtures = PKM_FIXTURES;
   const std::filesystem::path synth = SYNTH_FIXTURES;
 

@@ -1,5 +1,6 @@
 #include "pkm_convert.h"
 
+#include "body_size.h"
 #include "gen9_species_id.h"
 #include "species_facts.h"
 
@@ -136,6 +137,7 @@ std::optional<Pokemon> Convert(const Pokemon& origem, Format destino) {
   if (!c.ribbons) {
     p.ribbon_bytes = {};
     p.ribbon_count_memory = 0;
+    p.ribbon_count_battle = 0;
     p.affixed_ribbon = 0;
   }
   if (!c.contest) {
@@ -154,6 +156,15 @@ std::optional<Pokemon> Convert(const Pokemon& origem, Format destino) {
   }
   if (!c.sociability) p.sociability = 0;
   if (!c.move_records) p.move_record_flags.clear();
+  // SAINDO do gen9: o oficial grava o SCALE no HeightScalar do destino —
+  // PK9(H102 W115 S128) vira H128 W115 nos TRES formatos, PA8 inclusive
+  // (sonda P13). E o espelho da entrada (`Scale = HeightScalar`, 069/078).
+  // Sem isto, um capturado em Tera Raid perde a correlacao de seed que o
+  // PkHeX confere pela altura e cai em "Unable to match an encounter" — 108
+  // no SwSh e 101 no BDSP. So quando a ORIGEM e PK9: nos outros formatos
+  // p.scale e 0 e copiar zeraria a altura verdadeira.
+  if (origem.format == Format::kPK9 && p.scale != 0)
+    p.height_scalar = p.scale;
   if (!c.scale) p.scale = 0;
   if (!c.dynamax) {
     // §7: BDSP e PLA bloqueiam Gigantamax. Aqui o campo simplesmente nao
@@ -164,6 +175,27 @@ std::optional<Pokemon> Convert(const Pokemon& origem, Format destino) {
   }
   if (!c.palma) p.palma = 0;
   if (!c.alpha) {
+    // L3 (spec 138): o status do alpha NAO evapora ao sair do PA8. O destino
+    // que tem o bitfield de marks recebe a **Alpha Mark**, que e onde o
+    // "Former Alpha" do SV mora. Antes de zerar o bit, grava a mark.
+    //
+    // Medido na sonda `tools/pkhex-138` contra o EntityConverter do PkHeX:
+    //   ConvertToType(PA8 com IsAlpha -> PK9) liga [RibbonMarkAlpha] e SO ela.
+    //   RibbonMarkAlpha vive no byte 69 bit 3 = ribbon_bytes[13] & 0x08.
+    //
+    // A pesquisa dizia "Alpha Mark + Jumbo Mark"; a sonda MEDIU que o
+    // converter NAO liga a Jumbo (nem com scale 255, bloco A4). A Jumbo e
+    // uma mark que o JOGO concede pelo tamanho — nao a inventamos aqui.
+    if (p.is_alpha) {
+      if (c.ribbons) p.ribbon_bytes[13] |= 0x08;
+      // O alpha e sempre do tamanho maximo. O converter do PkHeX FORCA
+      // Scale=255 na saida de um alpha, medido (sonda 138, bloco A4):
+      //   PA8 ALPHA scale=  0 -> PK9 scale=255
+      //   PA8 ALPHA scale=128 -> PK9 scale=255
+      // Sem isto o "Former Alpha" chegaria ao SV com o tamanho errado, e a
+      // Jumbo Mark (que depende de scale==255) ficaria inalcancavel.
+      if (c.scale) p.scale = 255;
+    }
     p.is_alpha = false;
     p.is_noble = false;
     p.alpha_move = 0;
@@ -192,13 +224,16 @@ std::optional<Pokemon> Convert(const Pokemon& origem, Format destino) {
 
   // --- Campos que o destino exige e a origem nao tem --------------------
   // §7: "ao entrar em Scarlet/Violet, recebe Tera Type derivado do tipo
-  // primario". Confirmado contra o EntityConverter do PkHeX em 10/10 especies
-  // convertiveis: TeraTypeOriginal == PersonalTable.SV.Type1 (spec 069).
+  // primario". A spec 069 conferiu isso em 10 especies e fechou a regra como
+  // `== Type1` — mas nenhuma das 10 era Normal com segundo tipo.
+  //
+  // Medido em TODAS as 733 do SV (sonda P15, 2026-08-20): 707 recebem o
+  // Type1 e 26 recebem o Type2 — e os 26 sao exatamente os de Type1 = Normal.
+  // A regra e "o tipo que NAO e Normal". Starly (Normal/Flying) chegava com
+  // tera Normal e o PkHeX acusava "Tera Type does not match the expected
+  // value" — 26 dos nossos, o numero exato.
   if (c.tera && origem.format != Format::kPK9) {
-    const std::uint8_t t1 = pokehome::species::Type1(dex);
-    // 0xFF = dex invalida. Nao deveria acontecer (ToInternal ja aprovou), mas
-    // gravar 0xFF num byte de tera type seria pior que nao derivar.
-    p.tera_type_original = t1 == 0xFF ? 0 : t1;
+    p.tera_type_original = pokehome::species::TeraOnEntry(dex);
     p.tera_type_override = p.tera_type_original;
   }
 
@@ -208,6 +243,14 @@ std::optional<Pokemon> Convert(const Pokemon& origem, Format destino) {
   p.nickname = TruncUtf8(p.nickname, c.name_chars);
   p.ot_name = TruncUtf8(p.ot_name, c.trainer_chars);
   p.ht_name = TruncUtf8(p.ht_name, c.trainer_chars);
+  // O PB7 tem campos de 24 bytes: os 26 crus nao lhe servem, e o Write dele
+  // e textual mesmo. Zera para o proximo formato de 26 nao ressuscitar um
+  // buffer que ja nao corresponde ao texto truncado.
+  if (c.name_chars < 13) {
+    p.nickname_raw = {};
+    p.ot_name_raw = {};
+    p.ht_name_raw = {};
+  }
 
   // No PB7 a habilidade e u8: acima de 255 nao ha byte onde caiba. Zerar o
   // campo produziria um Pokemon com "habilidade nenhuma" em silencio — o
@@ -224,6 +267,85 @@ std::optional<Pokemon> Convert(const Pokemon& origem, Format destino) {
   if (destino == Format::kPB7 && p.form > 0x1F) return std::nullopt;
 
   return p;
+}
+
+void AjustesDeEntrada(Pokemon& mon, Format origem_fmt) {
+  const Format destino = mon.format;
+
+  // Mesmo formato: nada a ajustar. Mover dentro do proprio jogo continua sob
+  // a regra conservadora da spec 063.
+  if (destino == origem_fmt) return;
+
+  // Ao entrar no PK9 o PkHeX acusava `Invalid Obedience Level` e `Height does
+  // not match the expected value` — motivos NOVOS, que nao existiam na
+  // origem. Medido na sonda tools/pkhex-entry (spec 069/078):
+  //
+  //   ObedienceLevel = MetLevel        (met 5 -> obediencia 5)
+  //   Scale          = HeightScalar    (255 -> 255, e nao 0)
+  if (destino == Format::kPK9) {
+    mon.obedience_level = mon.met_level;
+    mon.scale = mon.height_scalar;
+  }
+  // Spec 143: o PA8 tem o MESMO campo (pa8.cpp:53 — "no PA8 o Scale do PkHeX
+  // repete o height scalar"), e ficou de fora quando a 069/078 corrigiu o
+  // PK9. O PkHeX acusa `Copy Height does not match the original value`.
+  // `obedience_level` NAO entra aqui: e conceito de gen 9, sem campo no PA8.
+  if (destino == Format::kPA8) mon.scale = mon.height_scalar;
+
+  // O SENTINELA de "nao veio de ovo" muda de formato para formato. Nao
+  // traduzi-lo produz `Egg Met Date is not a valid calendar date`, e foi o
+  // que chegou ao console do dono na spec 143: um Bidoof do BDSP entrou no
+  // Legends: Arceus com egg_location = 0xFFFF, enquanto os nativos tem 0.
+  //
+  // Medido nas duas direcoes (tools/pkhex-egg, e antes tools/pkhex-entry):
+  //   qualquer -> PB8      : EggLocation 0      vira 0xFFFF
+  //   PB8      -> qualquer : EggLocation 0xFFFF vira 0
+  //
+  // Vale so para quem NAO e ovo e nao nasceu de ovo (egg_date zerada). Um
+  // Pokemon com procedencia real de ovo tem local de verdade, e sobrescrever
+  // isso destruiria dado.
+  {
+    constexpr std::uint16_t kNone = 0;
+    constexpr std::uint16_t kBdspNone = 0xFFFF;
+    const bool sem_ovo = !mon.is_egg && mon.egg_date[0] == 0 &&
+                         mon.egg_date[1] == 0 && mon.egg_date[2] == 0;
+    if (sem_ovo) {
+      if (destino == Format::kPB8) {
+        if (mon.egg_location == kNone) mon.egg_location = kBdspNone;
+      } else if (mon.egg_location == kBdspNone) {
+        mon.egg_location = kNone;
+      }
+    }
+  }
+
+  // Altura/peso ABSOLUTOS (spec 143): o PA8 e o PB7 guardam floats derivados
+  // dos escalares; PB8/PK8/PK9 nao os tem. Sem recalcular, eles entram
+  // zerados e o PkHeX acusa "Calculated Height does not match stored value"
+  // — e o PLA renderiza registro ilegal como OVO.
+  //
+  // Mesma formula ja usada na subida gen3 (gen3_transfer.cpp:297), aqui
+  // reaproveitada em vez de reescrita: uma segunda copia divergiria na
+  // primeira correcao.
+  if (destino == Format::kPA8 || destino == Format::kPB7) {
+    namespace body = pokehome::body;
+    const bool pla = destino == Format::kPA8;
+    const body::Entry* tab = pla ? body::kLa : body::kGg;
+    const std::size_t n = pla ? sizeof(body::kLa) / sizeof(body::kLa[0])
+                              : sizeof(body::kGg) / sizeof(body::kGg[0]);
+    std::uint16_t base_h = 0, base_w = 0;
+    if (body::Lookup(tab, n, NationalDex(mon), mon.form, &base_h, &base_w) &&
+        base_h && base_w) {
+      body::Absolutes(pla ? body::kRatioPla : body::kRatioLgpe, base_h, base_w,
+                      mon.height_scalar, mon.weight_scalar,
+                      &mon.height_absolute, &mon.weight_absolute);
+    }
+  }
+
+  // PLA: docs/pesquisa-effort-levels-pla.md fechou a P-01 da spec 070. NAO
+  // existe conversao de effort levels — ao entrar, GV = 0 em tudo e os EVs
+  // passam intactos. Fonte: GameDataPA8.TryCreate do PkHeX, que inicializa
+  // ball/locations/moveset e nao toca em nenhum GV_*.
+  if (destino == Format::kPA8) mon.effort_levels = {};
 }
 
 }  // namespace pkm

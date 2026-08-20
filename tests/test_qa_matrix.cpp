@@ -465,12 +465,104 @@ static void TestN7() {
         "payload regravado carrega os golpes originais");
 }
 
+// N8 (spec 127): as direcoes nativo <-> nativo. E o caminho que o dono mais
+// usa — ate aqui a matriz so cobria gen3 -> moderno.
+struct JogoNativo {
+  const char* nome;
+  const char* save;
+  savew::Game game;
+  pkm::Format fmt;
+};
+
+static const JogoNativo kNativos[] = {
+    {"SwSh", "swsh/main", savew::Game::kSwSh, pkm::Format::kPK8},
+    {"SV", "sv/main", savew::Game::kSV, pkm::Format::kPK9},
+    {"BDSP", "bdsp/SaveData.bin", savew::Game::kBDSP, pkm::Format::kPB8},
+    {"PLA", "pla/main", savew::Game::kPLA, pkm::Format::kPA8},
+    {"LGPE", "lgpe/savedata.bin", savew::Game::kLGPE, pkm::Format::kPB7},
+};
+
+static void TestN8() {
+  std::printf("\n=== N8: direcoes nativo <-> nativo (spec 127) ===\n");
+  int convertidos = 0, recusados = 0, quebrados = 0;
+
+  for (const auto& origem : kNativos) {
+    auto sd = savew::Load(ReadFile(std::string(CLEAN_SAVES) + origem.save),
+                          origem.game);
+    if (!sd) {
+      Check(false, std::string(origem.nome) + ": save abriu");
+      continue;
+    }
+    const pkm::Pokemon* src = nullptr;
+    for (const auto& slot : sd->box) {
+      if (slot.present && slot.mon.species != 0) { src = &slot.mon; break; }
+    }
+    if (!src) {
+      Check(false, std::string(origem.nome) + ": tem Pokemon");
+      continue;
+    }
+    const std::uint16_t dex_orig = pkm::NationalDex(*src);
+
+    for (const auto& destino : kNativos) {
+      if (destino.fmt == origem.fmt) continue;  // mesmo formato: sem conversao
+      const std::string t =
+          std::string(origem.nome) + " -> " + destino.nome + ": ";
+      const auto conv = pkm::Convert(*src, destino.fmt);
+      if (!conv) {
+        // Recusa legitima: a especie nao e representavel no destino.
+        ++recusados;
+        std::printf("  -- %sdex %u nao cabe no destino (recusa ok)\n",
+                    t.c_str(), dex_orig);
+        continue;
+      }
+      ++convertidos;
+      bool ok = true;
+      if (pkm::NationalDex(*conv) != dex_orig) {
+        Check(false, t + "dex preservada");
+        ok = false;
+      }
+      if (conv->pid != src->pid) { Check(false, t + "PID intacto"); ok = false; }
+      if (conv->ivs != src->ivs) { Check(false, t + "IVs intactos"); ok = false; }
+      if (pkm::IsShiny(*conv) != pkm::IsShiny(*src)) {
+        Check(false, t + "shiny estavel");
+        ok = false;
+      }
+      if (conv->format != destino.fmt) {
+        Check(false, t + "formato do destino");
+        ok = false;
+      }
+      const auto bytes = vw::WriteModern(*conv);
+      if (bytes.empty()) {
+        Check(false, t + "serializa");
+        ok = false;
+      } else {
+        const auto re = vw::ParseNestPayload(vw::ToNestFormat(destino.fmt),
+                                             bytes.data(), bytes.size());
+        if (!re || pkm::NationalDex(*re) != dex_orig) {
+          Check(false, t + "reabre com a mesma especie");
+          ok = false;
+        }
+      }
+      if (!ok) {
+        ++quebrados;
+      } else {
+        std::printf("  ok: %sconverte e reabre (dex %u)\n", t.c_str(), dex_orig);
+      }
+    }
+  }
+  std::printf("    resumo: %d convertidas, %d recusas legitimas, %d quebradas\n",
+              convertidos, recusados, quebrados);
+  Check(quebrados == 0, "nenhuma direcao nativo<->nativo quebrada");
+  Check(convertidos >= 12, "cobertura minima de direcoes exercitadas");
+}
+
 int main() {
   std::printf("=== spec 114: matriz de validacao pre-PROD ===\n");
   TestN1();
   TestN2();
   TestN4();
   TestN7();
+  TestN8();
   TestU1();
   TestU2();
   TestU3();

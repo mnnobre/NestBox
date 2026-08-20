@@ -122,6 +122,7 @@ static std::string DiffModel(const pkm::Pokemon& a, const pkm::Pokemon& b) {
   CMP(home_tracker)
   CMP(ribbon_bytes)
   CMP(ribbon_count_memory)
+  CMP(ribbon_count_battle)
   CMP(affixed_ribbon)
   CMP(height_scalar)
   CMP(weight_scalar)

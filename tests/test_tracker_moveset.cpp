@@ -465,6 +465,223 @@ void TestCompatibilidadeRetroativa() {
 
 }  // namespace
 
+// ===========================================================================
+// Memoria de MECANICAS (spec 139, lacuna L4 da pesquisa).
+//
+// A regra: a transferencia e transversal e "quando volta e restaurado caso
+// fique limitado em algo" (DEC-1 do dono). O tera type nao existe no SwSh —
+// mas nao pode SUMIR por o Pokemon ter passado por la.
+// ===========================================================================
+void TestMemoriaDeMecanicas() {
+  std::printf("memoria de mecanicas (spec 139):\n");
+
+  // --- O ciclo que a L4 nomeia: SV -> banco -> SwSh -> banco -> SV --------
+  {
+    mm::Memory mem;
+    pkm::Pokemon p = MakeMon();
+    p.format = pkm::Format::kPK9;
+    p.origin_game = 50;             // SV
+    p.home_tracker = 0xABCDEF01;
+    p.tera_type_original = 12;      // um tera ESCOLHIDO, nao o do tipo 1
+    p.tera_type_override = 12;
+
+    // Sai do SV para o banco: o bucket de origem e SV, entao a chegada ao
+    // banco memoriza o que ele tinha LA.
+    mem.Remember(p, mm::Game::kSV);
+
+    const mm::Snapshot* guardado = mem.Recall(p.home_tracker, mm::Game::kSV);
+    Check(guardado != nullptr && guardado->tera_type == 12,
+          "o tera do SV fica guardado na memoria por jogo");
+
+    // Vai para o SwSh: o formato nao tem tera, e o Caps o zera na conversao.
+    // O MOVESET tambem muda — o SwSh reseta pelo learnset dele (spec 038), e
+    // e isso que faz a guarda `s->moves == p.moves` do RestoreOnBank deixar
+    // a restauracao acontecer. Um Pokemon que voltasse com o moveset
+    // IDENTICO ao guardado seria lido como "mover dentro da caixa".
+    pkm::Pokemon no_swsh = p;
+    no_swsh.tera_type_original = 0;   // o que a conversao para PK8 faz
+    no_swsh.tera_type_override = 0;
+    no_swsh.origin_game = 50;         // a ORIGEM nao muda ao transferir
+    no_swsh.moves = {33, 0, 0, 0};    // moveset do SwSh, diferente do do SV
+
+    // Volta ao banco vindo do SwSh: o RestoreOnBank devolve o do jogo de
+    // origem — e e aqui que o tera tem de reaparecer.
+    const bool mexeu = mm::RestoreOnBank(no_swsh, mem, mm::Game::kSwSh);
+    Check(mexeu, "a volta ao banco restaura do jogo de origem");
+    Check(no_swsh.tera_type_original == 12,
+          "TERA PRESERVADO no ciclo SV -> banco -> SwSh -> banco");
+  }
+
+  // --- Os outros campos, e a guarda do zero ------------------------------
+  {
+    mm::Memory mem;
+    pkm::Pokemon p = MakeMon();
+    p.home_tracker = 0x1111;
+    p.format = pkm::Format::kPA8;
+    p.origin_game = 47;             // PLA
+    p.is_alpha = true;
+    p.effort_levels = {5, 4, 3, 2, 1, 0};
+    p.can_gigantamax = true;
+    p.dynamax_level = 10;
+    mem.Remember(p, mm::Game::kLegendsArceus);
+
+    const mm::Snapshot* s = mem.Recall(p.home_tracker, mm::Game::kLegendsArceus);
+    Check(s != nullptr && s->alpha && s->gmax && s->dynamax_level == 10 &&
+              s->effort_levels[0] == 5,
+          "alpha, gmax, dynamax e GVs ficam guardados");
+
+    // Zero NAO sobrescreve: um Pokemon que hoje tem tera 7 e cuja memoria
+    // nada guardou nao pode perder o 7.
+    pkm::Pokemon outro = MakeMon();
+    outro.home_tracker = 0x2222;
+    outro.tera_type_original = 7;
+    outro.origin_game = 44;         // SwSh
+    mm::Memory vazia;
+    mm::RestoreOnBank(outro, vazia, mm::Game::kSV);
+    Check(outro.tera_type_original == 7,
+          "memoria vazia NAO apaga o que o Pokemon ja tem");
+  }
+
+  // --- Persistencia: os campos novos sobrevivem ao arquivo ---------------
+  {
+    mm::Memory mem;
+    pkm::Pokemon p = MakeMon();
+    p.home_tracker = 0x3333;
+    p.tera_type_original = 9;
+    p.is_alpha = true;
+    p.effort_levels = {1, 2, 3, 4, 5, 6};
+    mem.Remember(p, mm::Game::kSV);
+
+    const auto bytes = mm::Encode(mem);
+    mm::Memory lida;
+    Check(mm::Decode(bytes, 0, &lida), "a memoria com mecanicas serializa");
+    const mm::Snapshot* s = lida.Recall(0x3333, mm::Game::kSV);
+    Check(s != nullptr && s->tera_type == 9 && s->alpha &&
+              s->effort_levels[5] == 6,
+          "e volta do arquivo intacta");
+  }
+
+  // --- MIGRACAO (TD-01): o arquivo ANTERIOR nao pode ser perdido ---------
+  //
+  // A entrada cresceu de 24 para 32 bytes. Sem a deducao do tamanho, um
+  // banco gravado antes desta spec seria recusado por truncamento e o dono
+  // perderia a memoria inteira. Este teste monta os bytes da v1 A MAO.
+  {
+    std::vector<std::uint8_t> v1;
+    const std::uint32_t n = 1;
+    for (int i = 0; i < 4; ++i) v1.push_back((n >> (8 * i)) & 0xFF);
+    // Entrada de 24 bytes, layout da spec 071.
+    const std::uint64_t tracker = 0x4444;
+    for (int i = 0; i < 8; ++i) v1.push_back((tracker >> (8 * i)) & 0xFF);
+    v1.push_back(static_cast<std::uint8_t>(mm::Game::kSwSh));  // 8
+    v1.push_back(0);                                           // 9 reserva
+    const std::uint16_t moves[4] = {85, 86, 98, 21};
+    for (int i = 0; i < 4; ++i) {                              // 10..17
+      v1.push_back(moves[i] & 0xFF);
+      v1.push_back((moves[i] >> 8) & 0xFF);
+    }
+    for (int i = 0; i < 4; ++i) v1.push_back(3);               // 18..21 pp_ups
+    v1.push_back(0);                                           // 22..23 padding
+    v1.push_back(0);
+    Check(v1.size() == 4 + 24, "premissa: a entrada v1 tem 24 bytes");
+
+    mm::Memory antiga;
+    Check(mm::Decode(v1, 0, &antiga),
+          "arquivo ANTERIOR a spec 139 continua abrindo");
+    const mm::Snapshot* s = antiga.Recall(0x4444, mm::Game::kSwSh);
+    Check(s != nullptr, "a entrada antiga sobreviveu (nao virou memoria vazia)");
+    if (s) {
+      Check(s->moves[0] == 85 && s->moves[3] == 21 && s->pp_ups[0] == 3,
+            "o moveset do banco antigo esta intacto");
+      Check(s->tera_type == 0 && !s->alpha && s->effort_levels[0] == 0,
+            "os campos novos entram ZERADOS (nunca guardou nada disso)");
+    }
+
+    // Regravar promove ao formato novo sem perder o que havia.
+    const auto promovido = mm::Encode(antiga);
+    Check(promovido.size() == 4 + mm::kEntryBytes,
+          "regravado ja sai no formato novo (32 bytes/entrada)");
+    mm::Memory relida;
+    Check(mm::Decode(promovido, 0, &relida), "e o promovido volta a abrir");
+    const mm::Snapshot* s2 = relida.Recall(0x4444, mm::Game::kSwSh);
+    Check(s2 != nullptr && s2->moves[0] == 85,
+          "o moveset sobrevive a promocao");
+  }
+}
+
+
+// A identidade de origem sobrevive a ida ao SwSh (spec 145).
+//
+// O PK8 nao representa origem em jogo posterior: ao ENTRAR no Sword, o
+// commit_plan reescreve origin_game para SW/SH e troca o local por um codigo
+// 59996-60000. Sem reter o registro, a volta nao teria como desfazer isso — um
+// Charizard de Hisui viraria "veio do PLA" sem o local, para sempre.
+//
+// O dono decidiu (2026-08-20) RETER o registro, que e o comportamento do HOME.
+void TestIdentidadeDeOrigem() {
+  std::printf("identidade de origem sobrevive ao SwSh (spec 145):\n");
+
+  mm::Memory mem;
+  pkm::Pokemon p = MakeMon();
+  p.format = pkm::Format::kPA8;
+  p.origin_game = 47;          // PLA
+  p.met_location = 7;          // um local de Hisui
+  p.egg_location = 0;
+  p.ball = 28;                 // LA Poke Ball
+  p.home_tracker = 0x5145A145;
+  p.moves = {33, 45, 0, 0};
+
+  // Sai do PLA para o banco: o bucket de origem e o PLA, e e ai que a
+  // identidade verdadeira fica guardada.
+  mem.Remember(p, mm::Game::kLegendsArceus);
+  const mm::Snapshot* g = mem.Recall(p.home_tracker, mm::Game::kLegendsArceus);
+  Check(g != nullptr && g->origin_game == 47 && g->met_location == 7 &&
+            g->ball == 28,
+        "a identidade do PLA fica guardada no bucket de origem");
+
+  // Entra no SwSh: e o que o commit_plan faz (PLA -> SW, met 60000, ball
+  // Poke porque a de Hisui nao existe na gen8).
+  pkm::Pokemon no_swsh = p;
+  no_swsh.format = pkm::Format::kPK8;
+  no_swsh.origin_game = 44;
+  no_swsh.met_location = 60000;
+  no_swsh.ball = 4;
+  no_swsh.moves = {33, 0, 0, 0};   // o SwSh reseta pelo learnset dele
+
+  // Guardar AGORA nao pode sobrescrever o original com o codigo do HOME.
+  mem.Remember(no_swsh, mm::Game::kSwSh);
+  const mm::Snapshot* ainda = mem.Recall(p.home_tracker,
+                                         mm::Game::kLegendsArceus);
+  Check(ainda != nullptr && ainda->met_location == 7,
+        "guardar a passagem pelo SwSh NAO corrompe a identidade original");
+
+  // Volta ao banco: a identidade se restaura.
+  pkm::Pokemon volta = no_swsh;
+  mm::RestoreOnBank(volta, mem, mm::Game::kSwSh);
+  Check(volta.origin_game == 47, "origin_game volta a ser o PLA");
+  Check(volta.met_location == 7, "o local de Hisui volta");
+  Check(volta.ball == 28, "a ball de Hisui volta");
+
+  // E o caso que o atalho de moveset esconderia: mesmo com o moveset IGUAL
+  // ao guardado, a identidade ainda precisa voltar.
+  {
+    pkm::Pokemon igual = no_swsh;
+    igual.moves = p.moves;              // como se nada tivesse mudado
+    const bool mexeu = mm::RestoreOnBank(igual, mem, mm::Game::kSwSh);
+    Check(mexeu && igual.met_location == 7,
+          "restaura a identidade mesmo quando o moveset nao mudou");
+  }
+
+  // Quem NAO passou pelo SwSh nao e tocado: sem codigo do HOME, nada a fazer.
+  {
+    pkm::Pokemon nativo = p;
+    nativo.met_location = 7;
+    mm::RestoreOnBank(nativo, mem, mm::Game::kBdsp);
+    Check(nativo.met_location == 7 && nativo.ball == 28,
+          "um registro sem codigo do HOME fica intacto");
+  }
+}
+
 int main() {
   std::printf("== tracker e memoria de moveset (spec 071) ==\n\n");
   TestTracker();
@@ -478,6 +695,10 @@ int main() {
   TestPersistencia();
   std::printf("\n");
   TestCompatibilidadeRetroativa();
+  std::printf("\n");
+  TestMemoriaDeMecanicas();
+  std::printf("\n");
+  TestIdentidadeDeOrigem();
 
   std::printf("\n%s\n", g_failures == 0 ? "TUDO OK" : "FALHOU");
   return g_failures == 0 ? 0 : 1;

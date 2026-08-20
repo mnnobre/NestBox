@@ -2,6 +2,7 @@
 
 #include "pkm_crypto.h"
 #include "pkm_write_util.h"
+#include "species_facts.h"
 
 namespace pb7 {
 namespace {
@@ -58,6 +59,14 @@ enum Off : std::size_t {
   kWeightAbsolute = 228,  // 0xE4 float (spec 121)
   kHpCurrent = 240,  // HP atual, no NUCLEO (spec 119)
   kStatus = 232,
+  // Cauda de party do LGPE — dentro dos 260 bytes, nao num bloco a parte
+  // (spec 129, MEDIDO com tools/pkhex-pb7cp por mutacao contra o PkHeX):
+  //   0xEC level | 0xF0 HPcur | 0xF2 HPmax | 0xF4 Atk | 0xF6 Def
+  //   0xF8 Spe   | 0xFA SpA   | 0xFC SpD   | 0xFE CP
+  kStatLevel = 236,   // 0xEC
+  kStatHpMax = 242,   // 0xF2
+  kStatAtk = 244,     // 0xF4
+  kStatCp = 254,      // 0xFE
 };
 
 std::uint16_t U16(const std::uint8_t* d, std::size_t o) {
@@ -90,6 +99,88 @@ std::string Utf16ToUtf8(const std::uint8_t* d, std::size_t o, int max_chars) {
     }
   }
   return out;
+}
+
+// Preenche a cauda de party do LGPE — nivel, stats, HP cheio e CP (spec 129).
+//
+// Fecha o TD da spec 113: no Z-A/SwSh/SV o slot e 16 bytes MAIOR que o
+// registro e o `FillPartyTail16` do save_writer completa a diferenca. No LGPE
+// box e party tem o mesmo tamanho (260 == 260), entao aquele caminho nunca
+// dispara e o convertido chegava com nivel 0, stats 0 e CP 0.
+//
+// As formulas sao do PkHeX, medidas com `tools/pkhex-pb7cp` (20.000 casos
+// aleatorios, 0 divergencias) e conferidas contra os registros nativos do
+// save limpo:
+//
+//   stat[0] (HP) = (2*base + iv)*lvl/100 + lvl + 10 + AV
+//   stat[i]      = ((2*base + iv)*lvl/100 + 5) * natureza + AV
+//   BaseCP       = (int)( soma_dos_6_stats_SEM_AV * 6f * lvl / 100f )
+//   AwakeCP      = somaAV == 0 ? 0 : (int)( somaAV * (lvl*4f/100f + 2f) )
+//   CP           = min(BaseCP + AwakeCP, 10000)
+//
+// O LGPE IGNORA os EVs (medido: EV 252 nos seis nao muda stat nenhum) — quem
+// engorda o stat aqui e o AV, que soma direto. Por isso a formula NAO tem o
+// termo `ev/4` das outras geracoes, e o HP maximo tambem nao pode sair do
+// `species::MaxHp`, que assume EV.
+//
+// Base stats: a tabela `modern::kBaseStats` serve — as 153 especies do LGPE
+// tem base stat IDENTICO ao do gen9 (medido: 0 divergencias). Nenhuma tabela
+// nova, o TD-01 da spec 129 fica fechado sem gerar header.
+//
+// As contas de CP sao em `float` de proposito: e assim no PkHeX (IL do
+// `get_BaseCP`/`get_AwakeCP`), e em `double` o resultado erra por 1 em ~1,5%
+// dos casos.
+void FillPartyTail(std::uint8_t* d, const pkm::Pokemon& p) {
+  const int dex = p.species;
+  if (dex <= 0 || dex > 1025) return;
+  const std::uint8_t level = pokehome::species::LevelFromExp(dex, p.exp);
+  if (level == 0) return;
+  const std::uint8_t* base = pokehome::modern::kBaseStats[dex];
+
+  // Ordem fisica do save: HP, Atk, Def, Spe, SpA, SpD — a mesma de ivs/evs,
+  // da tabela e do FillPartyTail16 do save_writer.
+  const std::uint8_t nat = p.stat_nature ? p.stat_nature : p.nature;
+  const int up = nat / 5, down = nat % 5;
+  int stats[6];
+  int sum_av = 0;
+  for (int i = 0; i < 6; ++i) {
+    const int av = p.awakening_values[i];
+    sum_av += av;
+    const int core = (2 * base[i] + p.ivs[i]) * level / 100;
+    if (i == 0) {
+      stats[0] = core + level + 10 + av;
+    } else {
+      int v = core + 5;
+      if (up != down) {
+        if (i - 1 == up) v = v * 110 / 100;
+        if (i - 1 == down) v = v * 90 / 100;
+      }
+      stats[i] = v + av;
+    }
+  }
+
+  int sum_no_av = 0;
+  for (int i = 0; i < 6; ++i) sum_no_av += stats[i];
+  sum_no_av -= sum_av;
+  const int base_cp = static_cast<int>(static_cast<float>(sum_no_av) * 6.0f *
+                                       static_cast<float>(level) / 100.0f);
+  const int awake_cp =
+      sum_av == 0 ? 0
+                  : static_cast<int>(static_cast<float>(sum_av) *
+                                     (static_cast<float>(level) * 4.0f /
+                                          100.0f +
+                                      2.0f));
+  int cp = base_cp + awake_cp;
+  if (cp > 10000) cp = 10000;
+
+  d[kStatLevel] = level;
+  pkw::W16(d, kHpCurrent, static_cast<std::uint16_t>(stats[0]));  // HP cheio
+  pkw::W16(d, kStatHpMax, static_cast<std::uint16_t>(stats[0]));
+  for (int i = 1; i < 6; ++i) {
+    pkw::W16(d, kStatAtk + 2 * (i - 1), static_cast<std::uint16_t>(stats[i]));
+  }
+  pkw::W16(d, kStatCp, static_cast<std::uint16_t>(cp));
+  pkw::W32(d, kStatus, 0);  // chega sem dormir/queimado
 }
 
 }  // namespace
@@ -198,7 +289,11 @@ std::optional<pkm::Pokemon> Parse(const std::vector<std::uint8_t>& data) {
 
 std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   std::vector<std::uint8_t> buf = p.raw;  // TD-01
-  if (buf.size() != kStoredSize) buf.assign(kStoredSize, 0);  // TD-02
+  // `raw` vazio = registro CONVERTIDO (nao veio de um PB7 lido). E o mesmo
+  // gatilho que o `FillPartyTail16` do save_writer usa nos outros jogos: o
+  // nativo passa reto e continua byte-identico.
+  const bool convertido = buf.size() != kStoredSize;
+  if (convertido) buf.assign(kStoredSize, 0);  // TD-02
   std::uint8_t* d = buf.data();
 
   pkw::W32(d, kEC, p.encryption_constant);
@@ -278,6 +373,11 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   d[kLanguage] = p.language;
   pkw::W16(d, kHpCurrent, p.hp_current);
   pkw::W32(d, kStatus, p.status_condition);
+
+  // Convertido: preenche a cauda de party (spec 129). Vem DEPOIS do
+  // `hp_current` acima de proposito — o valor do modelo sai da formula com
+  // EV das outras geracoes, e no LGPE o HP maximo e outro numero.
+  if (convertido) FillPartyTail(d, p);
 
   // Nao escritos de proposito (o parser nao le): altura/peso absolutos
   // (floats em 44 e 228), resort event status, data de recebimento

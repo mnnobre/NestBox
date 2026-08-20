@@ -477,9 +477,9 @@ int main() {
   // (descoberta escrita-e-transferencia, "Linha de base de legalidade").
   const Caso casos[] = {
       {"Shield", "01008DB008C2C000/Amaral/main", savew::Game::kSwSh, 194},
-      {"Scarlet", "0100A3D008C5C000/Amaral/main", savew::Game::kSV, 440},
-      {"Legends Arceus", "01001F5010DFA000/Amaral/main", savew::Game::kPLA, 0},
-      {"BDSP", "0100000011D90000/Amaral/SaveData.bin", savew::Game::kBDSP, 255},
+      {"Scarlet", "0100A3D008C5C000/Amaral/main", savew::Game::kSV, 3},
+      {"Legends Arceus", "01001F5010DFA000/Amaral/main", savew::Game::kPLA, 3},
+      {"BDSP", "0100000011D90000/Amaral/SaveData.bin", savew::Game::kBDSP, 3},
       {"LGPE", "0100187003A36000/Amaral/savedata.bin", savew::Game::kLGPE, 92},
       // Spec 080. O UNICO save legitimo do projeto: 96 Pokemon, 96/96 LEGAIS
       // pelo PkHeX, OT=Amaral (o proprio dono). E por isso o save de

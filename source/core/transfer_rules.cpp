@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "game_forms.h"
 #include "game_moves.h"
 #include "gen9_species.h"
 #include "pkm_convert.h"
@@ -28,6 +29,32 @@ std::string SpeciesName(int dex) {
 // interno == nacional, mas a regra nao deve depender disso.
 bool IsLetsGoPartner(int dex, const pkm::Pokemon& p) {
   return (dex == 25 && p.form == 8) || (dex == 133 && p.form == 1);
+}
+
+// Nivel minimo para o destino aceitar Hyper Training (spec 137, DEC-2 do
+// dono). Antes era um "100" global preso dentro da regra do BDSP; o SV libera
+// Hyper Training a partir do NIVEL 50, e o dono decidiu que a barreira e a do
+// JOGO DE DESTINO, nao uma constante do HOME.
+//
+// Devolve 0 = "este jogo nao tem a mecanica, entao nao ha o que barrar". Vale
+// para tudo antes da gen 7: o Hyper Training nasce em Sun/Moon, e num destino
+// que nao o conhece a flag simplesmente nao viaja. Barrar ali seria inventar
+// uma regra que o HOME nao tem — e reprovaria transferencia legal.
+std::uint8_t MinHyperTrainingLevel(cp::Game dest) {
+  switch (dest) {
+    case cp::Game::kScarletViolet:
+      return 50;
+    case cp::Game::kSunMoon:
+    case cp::Game::kUltraSunMoon:
+    case cp::Game::kLetsGo:
+    case cp::Game::kSwordShield:
+    case cp::Game::kBdsp:
+    case cp::Game::kLegendsArceus:
+    case cp::Game::kLegendsZA:
+      return 100;
+    default:
+      return 0;  // pre-gen7: a mecanica nao existe
+  }
 }
 
 bool AnyHyperTrained(const pkm::Pokemon& p) {
@@ -112,6 +139,20 @@ RuleResult CanTransfer(const pkm::Pokemon& p, cp::Game dest,
             name + " nao existe em " + cp::GameName(dest)};
   }
 
+  // Regra GERAL, a outra metade (spec 137, lacuna L5): a FORMA tambem tem de
+  // existir nos dados do destino. O HOME diz "especie E forma"; nos so
+  // conferiamos a especie, entao um Alolan Vulpix entrava num save de BDSP —
+  // o BDSP tem Vulpix, mas nao tem a forma no codigo do jogo (medido: as 66
+  // entradas de forma do BDSP sao Unown/Arceus/Rotom/Deoxys e afins, nenhuma
+  // regional). Idem um Zorua de Hisui indo para o SwSh.
+  //
+  // `HasForm` devolve true para jogo sem tabela medida (pre-Switch), entao
+  // esta linha nunca barra por falta de dado — ver game_forms.h.
+  if (!cp::HasForm(dest, dex, p.form)) {
+    return {Verdict::kBlocked,
+            "Esta forma de " + name + " nao existe em " + cp::GameName(dest)};
+  }
+
   if (dest == cp::Game::kBdsp) {
     // So 1 exemplar de cada Lendario/Mitico por save.
     if (sf::IsLegendary(dex) && ctx.Has(p.species)) {
@@ -123,13 +164,23 @@ RuleResult CanTransfer(const pkm::Pokemon& p, cp::Game dest,
     if (p.can_gigantamax) {
       return {Verdict::kBlocked, "BDSP nao aceita Pokemon Gigantamax"};
     }
-    // Hyper Training abaixo do lv100 nao entra. O nivel vem da exp pela curva
-    // de crescimento da especie (spec 076) quando o chamador nao passa um —
-    // nao ha mais o caso "esqueceu de preencher, a regra sumiu".
-    if (AnyHyperTrained(p) && ctx.LevelOf(p) < 100) {
-      return {Verdict::kBlocked,
-              "BDSP so aceita Hyper Training no nivel 100"};
-    }
+    // O Nincada ERA bloqueado aqui (spec 135, paridade cega com o HOME). A
+    // spec 141 o LIBEROU, pelo criterio da DEC-2 do dono: o bloqueio oficial
+    // e politica ANTI-CLONAGEM da Nintendo (o Nincada evolui em DOIS de uma
+    // vez, e o servico marca o par como clone), nao limite do cartucho.
+    //
+    // MEDIDO: o BDSP tem Nincada (290), Ninjask (291) e Shedinja (292) nos
+    // dados — `HasSpecies` e `HasForm` devolvem true para os tres. O jogo
+    // suporta; quem recusava era a regra de negocio.
+    //
+    // Divergencia deliberada do HOME, na familia da DEC-1/DEC-2. Nao
+    // "corrigir" achando que e bug.
+    // Spinda: NAO ha bloqueio (spec 137, DEC-2 do dono). A spec 135 o
+    // bloqueava copiando o HOME. A pesquisa mostrou que as pintas saem do
+    // encryption constant/PID, que todo formato moderno carrega — o bug das
+    // "pintas iguais" do HOME 3.0.0 era VISUAL e foi corrigido no 3.0.1; o
+    // dado nunca se perdeu. Onde o jogo nao tem Spinda, o portao geral por
+    // especie ja barra (medido: das 6 modernas, so o BDSP o tem).
   }
 
   if (dest == cp::Game::kLegendsArceus && p.can_gigantamax) {
@@ -137,10 +188,52 @@ RuleResult CanTransfer(const pkm::Pokemon& p, cp::Game dest,
             "Legends: Arceus nao aceita Pokemon Gigantamax"};
   }
 
+  // SV bloqueia o Gigantamax factor nas especies que ainda EVOLUEM
+  // (spec 135): o SV nao conhece a flag, deixaria evoluir, e nasceria um
+  // Gmax que nao existe (Raichu/Archaludon Gmax). LISTA, e nao criterio: o
+  // Duraludon entrou por patch do HOME (v3.2.1), o que mostra que o servidor
+  // mantem lista — se ela crescer, cresce aqui (TD-02 / D1 da pesquisa).
+  if (dest == cp::Game::kScarletViolet && p.can_gigantamax) {
+    static constexpr std::uint16_t kGmaxEvolving[] = {25, 52, 133, 884};
+    for (std::uint16_t d : kGmaxEvolving) {
+      if (dex == d) {
+        return {Verdict::kBlocked,
+                name + " Gigantamax nao entra em Scarlet/Violet"};
+      }
+    }
+  }
+
+  // Hyper Training: o nivel minimo e o do JOGO DE DESTINO (spec 137, DEC-2).
+  // O nivel vem da exp pela curva de crescimento da especie (spec 076) quando
+  // o chamador nao passa um — nao ha mais o caso "esqueceu de preencher, a
+  // regra sumiu".
+  if (AnyHyperTrained(p)) {
+    const std::uint8_t min_level = MinHyperTrainingLevel(dest);
+    if (min_level != 0 && ctx.LevelOf(p) < min_level) {
+      return {Verdict::kBlocked,
+              std::string(cp::GameName(dest)) + " so aceita Hyper Training a partir do nivel " +
+                  std::to_string(min_level)};
+    }
+  }
+
   // --- Avisos ------------------------------------------------------------
 
-  // TD-02: golpe ausente AVISA, nao bloqueia (spec 038, §7 — o destino
-  // reseta o moveset por conta propria).
+  // TD-02: golpe ausente AVISA, nao bloqueia.
+  //
+  // A justificativa ORIGINAL (spec 038) era "o destino reseta o moveset por
+  // conta propria". Isso foi MEDIDO em 2026-08-19 e e FALSO: um golpe que
+  // nao existe na engine do PLA (id 903, de gen9) **mata o jogo** em ~11 s,
+  // sem excecao no log. O jogo nao reseta nada — quem reseta o moveset e o
+  // HOME, e aqui esse papel e do NestBox.
+  //
+  // O aviso continua correto, mas por outro motivo: `AplicaEntradaNoDestino`
+  // (commit_plan.cpp) reescreve o moveset em TODA entrada, entao o golpe
+  // invalido nunca chega ao save. Bloquear seria recusar uma transferencia
+  // que o proprio app conserta.
+  //
+  // A trava que sustenta isso e o caminho unico de entrada. Se algum dia
+  // houver um caminho de escrita que NAO passe por la, este aviso vira um
+  // bug que trava o console do usuario.
   const int missing = cp::MissingMoveIn(dest, p.moves.data(), p.moves.size());
   if (missing != 0) {
     return {Verdict::kWarning,

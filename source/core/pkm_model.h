@@ -31,6 +31,7 @@ enum class Format : std::uint8_t {
   kPB8,  // BDSP (328/344)
   kPA8,  // Legends Arceus (360/376)
   kPK9,  // Scarlet/Violet e Legends Z-A (328/344)
+  kPK4,  // Diamond/Pearl/Platinum/HGSS (136/236) — spec 126
 };
 
 const char* FormatName(Format f);
@@ -58,6 +59,16 @@ struct Pokemon {
   bool is_egg = false;            // [HOME §7] ovo nao deposita
   bool is_nicknamed = false;      // [extra]
   std::string nickname;           // [HOME §6] UTF-8
+
+// Os 26 bytes CRUS dos campos de texto (spec 145). O jogo escreve o nome por
+// cima de um buffer usado, e o lixo depois do terminador FAZ PARTE do
+// registro: o PkHeX exige o trash do OT nos capturados do Max Lair
+// ("[Trainer] TrashBytesExpected", 21 casos), e reconstruir a string limpa o
+// destroi. Todo-zero = "sem bytes crus" — o Write cai no caminho textual.
+// So os formatos de campo 26 (pk8/pb8/pk9/pa8); o PB7 (24) fica no textual.
+std::array<std::uint8_t, 26> nickname_raw{};
+std::array<std::uint8_t, 26> ot_name_raw{};
+std::array<std::uint8_t, 26> ht_name_raw{};
   std::uint8_t language = 0;      // [HOME §6] tag de idioma (ENG/POR/...)
   std::uint32_t pid = 0;          // [HOME §6] personality (shiny deriva daqui)
   bool fateful_encounter = false; // [extra]
@@ -142,13 +153,19 @@ struct Pokemon {
   std::array<std::uint8_t, 3> egg_date{};  // [extra]
   std::uint8_t ball = 0;           // [HOME §6/§7] preservada sempre
   std::uint64_t home_tracker = 0;  // [HOME §7] tracker de 64 bits do servidor
+  // Gen4 (spec 126): D/P usam um par de campos de local e Platinum/HGSS
+  // outro (estendido). O par DP fica aqui para o roundtrip ser fiel;
+  // met_location/egg_location carregam o valor EFETIVO (ext || dp).
+  std::uint16_t met_location_dp = 0;   // [extra] so pk4
+  std::uint16_t egg_location_dp = 0;   // [extra] so pk4
 
   // --- Cosmetica / flags em lote --------------------------------------
   // Ribbons e marks sao ~16 bytes de bitfield com ~120 nomes padronizados
   // pelo PkHeX. Guardados crus (TD-01): a F16 mapeia os que exibir.
   // [HOME §7] "ribbons preservadas sempre; marks (SwSh+)".
   std::array<std::uint8_t, 16> ribbon_bytes{};
-  std::uint8_t ribbon_count_memory = 0;   // [extra] affixed/count nos gen8+
+  std::uint8_t ribbon_count_memory = 0;   // [extra] Contest Memory (byte 60)
+  std::uint8_t ribbon_count_battle = 0;   // [extra] Battle Memory (byte 61, spec 136)
   std::uint8_t affixed_ribbon = 0;        // [extra]
 
   // --- Corpo (gen8+) ---------------------------------------------------

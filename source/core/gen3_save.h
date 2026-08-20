@@ -413,6 +413,13 @@ std::uint8_t Gender(const BoxPokemon& mon);
 // da curva de crescimento da especie.
 std::uint8_t LevelFromExp(std::uint32_t exp, std::uint8_t growth_rate);
 
+// O inverso: experiencia minima do nivel n naquela curva (spec 144). Nenhum
+// formato guarda o nivel — quem escolhe "nivel 50" precisa gravar a EXP
+// correspondente, ou o jogo mostra outro nivel. Fora de 1..100 e presa na
+// faixa. As 6 curvas do byte 19 do personal: 0=MedFast 1=Erratic 2=Fluctuating
+// 3=MedSlow 4=Fast 5=Slow.
+std::uint32_t ExpForLevel(int nivel, std::uint8_t growth_rate);
+
 // Stats de batalha calculados. Pokemon guardado em caixa nao os armazena — o
 // bloco de stats so existe no formato de party (100 bytes). Aqui aplicamos a
 // formula do jogo sobre base stats, IVs, EVs, nivel e natureza.

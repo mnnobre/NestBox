@@ -192,57 +192,14 @@ Plan Prepare(const savew::SaveData& src_in, const savew::SaveData& dst_in,
 
   // --- Ajustes de ENTRADA -------------------------------------------------
   //
-  // O tera type do SV o proprio Convert deriva (§7, confirmado contra o
-  // EntityConverter na spec 069).
+  // Obedience/scale no PK9, sentinela de egg location, effort levels do PLA.
+  // Desde a spec 143 as tres regras vivem em `pkm::AjustesDeEntrada`, e nao
+  // aqui: elas existiam SO neste caminho, e o deposito pela tela — que e o
+  // que o dono usa — as pulava inteiras. Um Pokemon do BDSP chegava ao
+  // Legends: Arceus com o sentinela do BDSP e virava ovo no jogo.
   //
-  // Faltavam DOIS, e o criterio DELTA da descoberta foi quem os achou: ao
-  // entrar no PK9, o PkHeX passou a acusar `Invalid Obedience Level` e
-  // `Height does not match the expected value` — motivos que NAO existiam na
-  // origem. Motivo novo e bug nosso, entao a resposta veio da sonda
-  // (tools/pkhex-entry, mesmo metodo da 069):
-  //
-  //   ObedienceLevel = MetLevel        (met 5 -> obediencia 5; met 1 -> 1)
-  //   Scale          = HeightScalar    (255 -> 255, e nao 0)
-  //
-  // Com os dois assim, o proprio EntityConverter do PkHeX produz um PK9 sem
-  // nenhum desses dois motivos no relatorio.
-  if (dst_fmt == pkm::Format::kPK9 && origem_fmt != pkm::Format::kPK9) {
-    mon.obedience_level = mon.met_level;
-    mon.scale = mon.height_scalar;
-  }
-
-  // O SENTINELA de "nao veio de ovo" muda de formato para formato, e nao
-  // traduzi-lo produz `Egg Met Date is not a valid calendar date` — outro
-  // motivo NOVO que o criterio DELTA pegou. Medido na mesma sonda, nas duas
-  // direcoes:
-  //
-  //   qualquer -> PB8 : EggLocation 0     vira 0xFFFF
-  //   PB8      -> qualquer : EggLocation 0xFFFF vira 0
-  //
-  // Vale so para quem NAO e ovo e nao nasceu de ovo (egg_date zerada). Um
-  // Pokemon com procedencia real de ovo tem local de verdade, e sobrescrever
-  // isso destruiria dado — a regra da spec 063 aplicada a um campo so.
-  {
-    constexpr std::uint16_t kNone = 0;
-    constexpr std::uint16_t kBdspNone = 0xFFFF;
-    const bool sem_ovo = !mon.is_egg && mon.egg_date[0] == 0 &&
-                         mon.egg_date[1] == 0 && mon.egg_date[2] == 0;
-    if (sem_ovo) {
-      if (dst_fmt == pkm::Format::kPB8) {
-        if (mon.egg_location == kNone) mon.egg_location = kBdspNone;
-      } else if (mon.egg_location == kBdspNone) {
-        mon.egg_location = kNone;
-      }
-    }
-  }
-
-  //
-  // PLA: docs/pesquisa-effort-levels-pla.md FECHOU a pendencia P-01 da spec
-  // 070. NAO existe conversao de effort levels: ao entrar, GV = 0 em tudo e
-  // os EVs passam INTACTOS (o jogo ignora EV; o effort level exibido e
-  // GV + bias(IV), derivado em runtime). Fonte: GameDataPA8.TryCreate do
-  // PKHeX, que inicializa ball/locations/moveset e nao toca em nenhum GV_*.
-  if (plan.dst.game == savew::Game::kPLA) mon.effort_levels = {};
+  // O tera type do SV o proprio Convert deriva (§7, spec 069).
+  pkm::AjustesDeEntrada(mon, origem_fmt);
 
   // O HANDLING TRAINER. Achado pela bateria da spec 078 (G14), e so ela
   // poderia te-lo achado: nos saves de terceiros da spec 075 os Pokemon ja
@@ -281,6 +238,7 @@ Plan Prepare(const savew::SaveData& src_in, const savew::SaveData& dst_in,
       r.handler_unknown = true;
     } else {
       mon.ht_name = dst_ot;
+      mon.ht_name_raw = {};  // quem muda o texto zera o raw (spec 145)
       mon.ht_gender = dst_ot_gender;
       mon.ht_language = dst_ot_lang;
       mon.current_handler = 1;

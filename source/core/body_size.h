@@ -559,28 +559,53 @@ inline bool Lookup(const Entry* table, std::size_t n, int dex, int form,
 
 // Altura e peso ABSOLUTOS a partir dos scalars (spec 121). UM lugar so: o
 // verificador de legalidade compara e o conversor grava — formulas
-// separadas divergiriam em silencio, e o verify reprovaria o que nos mesmos
-// escrevemos.
-//
-// As constantes diferem por formato (medido contra o PkHeX):
+// separadas divergiriam em silencio. As constantes diferem por formato:
 //   PA8 (PLA):  ratio = 0.8 + 0.4 * scalar/255
 //   PB7 (LGPE): ratio = 0.6 + 0.8 * scalar/255
-// O peso escala pelos DOIS ratios (altura e peso).
 struct SizeRatio {
-  double a;  // fator do scalar
-  double b;  // base
+  float a;                // fator do scalar (do ratio de ALTURA)
+  float b;                // base (do ratio de ALTURA)
+  bool weight_base_last;  // agrupamento do peso: PA8 (fh*fw)*W, PB7 fh*(fw*W)
 };
 
-inline constexpr SizeRatio kRatioPla{0.4, 0.8};
-inline constexpr SizeRatio kRatioLgpe{0.8, 0.6};
+// As constantes NAO sao os literais "redondos": sao os bits exatos lidos do
+// IL do PkHeX 25.12.21 com a sonda tools/pkhex-peso (spec 143). O fator do
+// PLA e 0x3ECCCCCE (1 ULP ACIMA de 0.4f) e o da altura do LGPE e 0x3F4CCCCC
+// (1 ULP ABAIXO de 0.8f) — trocar por 0.4f/0.8f reintroduz o
+// `Calculated Weight does not match stored value` em ~20% dos escalares.
+inline constexpr SizeRatio kRatioPla{0.40000004f, 0.8f, true};
+inline constexpr SizeRatio kRatioLgpe{0.79999995f, 0.6f, false};
 
+// A ARITMETICA importa: tudo em `float`, com as constantes e o agrupamento
+// EXATOS do PkHeX (IL de PA8/PB7.GetWeightAbsolute, sonda tools/pkhex-peso,
+// spec 143):
+//
+//   ratio_h = (float)scalar / 255.0f * r.a + r.b        <- divisao em FLOAT
+//   ratio_w = (float)scalar / 255.0f * 0.40000004f + 0.8f   (igual nos dois)
+//   altura  = ratio_h * (float)base_h
+//   peso    = PA8: (ratio_h * ratio_w) * base_w
+//             PB7:  ratio_h * (ratio_w * base_w)
+//
+// Medido bit a bit contra o PkHeX: 917.504 combinacoes no PA8 e 720.896 no
+// PB7, 0 divergencias. Com 0.4f "bonito" no lugar da constante do IL, ~20%
+// dos escalares divergem por 1 ULP e o verificador reprova o peso.
+//
+// Os `volatile` impedem o compilador de contrair mul+add em FMA
+// (-ffp-contract=fast e o default do GCC, e no aarch64 do Switch o fmadd
+// existe de fabrica) — a contracao mudaria o ultimo bit so no console.
 inline void Absolutes(const SizeRatio& r, std::uint16_t base_h,
                       std::uint16_t base_w, std::uint8_t height_scalar,
                       std::uint8_t weight_scalar, float* out_h, float* out_w) {
-  const double fh = height_scalar / 255.0 * r.a + r.b;
-  const double fw = weight_scalar / 255.0 * 0.4 + 0.8;
-  if (out_h) *out_h = static_cast<float>(base_h * fh);
-  if (out_w) *out_w = static_cast<float>(base_w * fh * fw);
+  volatile float th = static_cast<float>(height_scalar) / 255.0f * r.a;
+  volatile float tw =
+      static_cast<float>(weight_scalar) / 255.0f * 0.40000004f;
+  const float fh = th + r.b;
+  const float fw = tw + 0.8f;
+  if (out_h) *out_h = fh * static_cast<float>(base_h);
+  if (out_w)
+    *out_w = r.weight_base_last
+                 ? fh * fw * static_cast<float>(base_w)
+                 : fh * (fw * static_cast<float>(base_w));
 }
 
 }  // namespace pokehome::body

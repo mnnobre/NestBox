@@ -1,3 +1,5 @@
+#include <cstring>
+
 #include "pk9.h"
 
 #include "pkm_crypto.h"
@@ -159,6 +161,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   for (int i = 0; i < 8; ++i) p.ribbon_bytes[i] = d[kRibbonsA + i];
   for (int i = 0; i < 8; ++i) p.ribbon_bytes[8 + i] = d[kRibbonsB + i];
   p.ribbon_count_memory = d[kContestMemoryCount];
+  p.ribbon_count_battle = d[kBattleMemoryCount];
   p.affixed_ribbon = d[kAffixedRibbon];
 
   p.height_scalar = d[kHeight];
@@ -166,6 +169,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.scale = d[kScale];
 
   p.nickname = Utf16ToUtf8(d, kNickname);
+  std::memcpy(p.nickname_raw.data(), d + kNickname, 26);
   for (int i = 0; i < 4; ++i) p.moves[i] = U16(d, kMoves + i * 2);
   for (int i = 0; i < 4; ++i) p.pp[i] = d[kPp + i];
   for (int i = 0; i < 4; ++i) p.pp_ups[i] = d[kPpUps + i];
@@ -184,6 +188,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.tera_type_override = d[kTeraOverride];
 
   p.ht_name = Utf16ToUtf8(d, kHtName);
+  std::memcpy(p.ht_name_raw.data(), d + kHtName, 26);
   p.ht_gender = d[kHtGender];
   p.ht_language = d[kHtLanguage];
   p.current_handler = d[kCurrentHandler];
@@ -199,6 +204,7 @@ std::optional<pkm::Pokemon> Parse(const std::uint8_t* data, std::size_t size) {
   p.language = d[kLanguage];
 
   p.ot_name = Utf16ToUtf8(d, kOtName);
+  std::memcpy(p.ot_name_raw.data(), d + kOtName, 26);
   p.ot_friendship = d[kOtFriendship];
   p.ot_memory.intensity = d[kOtMemoryIntensity];
   p.ot_memory.memory = d[kOtMemory];
@@ -273,13 +279,14 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   for (int i = 0; i < 8; ++i) d[kRibbonsA + i] = p.ribbon_bytes[i];
   for (int i = 0; i < 8; ++i) d[kRibbonsB + i] = p.ribbon_bytes[8 + i];
   d[kContestMemoryCount] = p.ribbon_count_memory;
+  d[kBattleMemoryCount] = p.ribbon_count_battle;
   d[kAffixedRibbon] = p.affixed_ribbon;
 
   d[kHeight] = p.height_scalar;
   d[kWeight] = p.weight_scalar;
   d[kScale] = p.scale;
 
-  pkw::WriteUtf16(d, kNickname, p.nickname, 13);
+  pkw::WriteName26(d, kNickname, p.nickname_raw, p.nickname);
   for (int i = 0; i < 4; ++i) pkw::W16(d, kMoves + i * 2, p.moves[i]);
   for (int i = 0; i < 4; ++i) d[kPp + i] = p.pp[i];
   for (int i = 0; i < 4; ++i) d[kPpUps + i] = p.pp_ups[i];
@@ -308,7 +315,7 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   d[kTeraOriginal] = p.tera_type_original;
   d[kTeraOverride] = p.tera_type_override;
 
-  pkw::WriteUtf16(d, kHtName, p.ht_name, 13);
+  pkw::WriteName26(d, kHtName, p.ht_name_raw, p.ht_name);
   d[kHtGender] = p.ht_gender;
   d[kHtLanguage] = p.ht_language;
   d[kCurrentHandler] = p.current_handler;
@@ -323,7 +330,7 @@ std::vector<std::uint8_t> Write(const pkm::Pokemon& p) {
   pkw::W32(d, kFormArgument, p.form_argument);
   d[kLanguage] = p.language;
 
-  pkw::WriteUtf16(d, kOtName, p.ot_name, 13);
+  pkw::WriteName26(d, kOtName, p.ot_name_raw, p.ot_name);
   d[kOtFriendship] = p.ot_friendship;
   d[kOtMemoryIntensity] = p.ot_memory.intensity;
   d[kOtMemory] = p.ot_memory.memory;

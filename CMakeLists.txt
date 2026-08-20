@@ -4,7 +4,7 @@ project(pokehome C CXX)
 
 # Versao do app. Deve casar com a tag da release no GitHub — e o que o
 # auto-update compara. Ao publicar uma release nova, subir aqui tambem.
-set(NESTBOX_VERSION "0.9.14")
+set(NESTBOX_VERSION "0.9.15")
 # Repo publico so de releases — o codigo vive no repo privado mnnobre/NestBox.
 set(NESTBOX_REPO "mnnobre/NestBox")
 
@@ -13,6 +13,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Core: parsing puro, sem dependencia de plataforma. Compila em PC e no Switch.
 add_library(pokehome_core STATIC
+  source/core/commit_plan.cpp
+  source/core/generator.cpp
   source/core/gen3_save.cpp
   source/core/za_save.cpp
   source/core/pkm_crypto.cpp
@@ -20,6 +22,7 @@ add_library(pokehome_core STATIC
   source/core/pkm_model.cpp
   source/core/pk8.cpp
   source/core/pk9.cpp
+  source/core/pk4.cpp
 source/core/pa8.cpp
   source/core/pb7.cpp
   source/core/pb8.cpp
@@ -112,7 +115,10 @@ add_executable(test_pb7 tests/test_pb7.cpp)
 target_link_libraries(test_pb7 PRIVATE pokehome_core)
 target_compile_definitions(test_pb7 PRIVATE
   PKM_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/OpenHome/test-files/pkm-files/"
-  PKHEX_JSON="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pkhex/")
+  PKHEX_JSON="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/pkhex/"
+  # spec 129: o deposito da cauda de party do LGPE e exercitado contra o save
+  # limpo, em memoria (o arquivo nunca e reescrito).
+  CLEAN_SAVES="${CMAKE_CURRENT_SOURCE_DIR}/tests/saves-limpos/")
 add_test(NAME pb7 COMMAND test_pb7)
 
 # Cifra de PARTY dos 4 formatos de bloco grande (spec 066). Fecha a pendencia
@@ -178,6 +184,45 @@ add_executable(test_gen3 tests/test_gen3.cpp)
 target_link_libraries(test_gen3 PRIVATE pokehome_core)
 add_test(NAME gen3 COMMAND test_gen3)
 
+# Gerador da fixture do controle remoto (spec 134). Nao e teste: e a
+# ferramenta que planta um Pokemon conhecido num save gen3 sintetico, para o
+# roteiro poder afirmar especie e nivel sem depender de save real.
+add_executable(make_ui_fixture tests/make_ui_fixture.cpp)
+target_link_libraries(make_ui_fixture PRIVATE pokehome_core)
+
+# Decisao pura do commit (spec 128): o fio que costura a gravacao — separar
+# por lado, converter em cada direcao, relembrar na chegada — que ate agora
+# so tinha conferencia manual.
+# O round-trip save -> NestBox -> save (spec 145). Sem `add_test`: precisa dos
+# saves reais do dono, que nao vao para o git. Roda a mao:
+#   matriz_nestbox <save A> [save B]
+add_executable(matriz_nestbox tests/matriz_nestbox.cpp)
+target_link_libraries(matriz_nestbox PRIVATE pokehome_core)
+
+# As tres ferramentas do ciclo de lote (spec 143/145). Estavam fora do CMake e
+# eram compiladas a mao — um `cmake --build .` dizia "no work to do" com o
+# fonte alterado, e o .exe velho seguia rodando. Sem `add_test`: nao sao teste,
+# sao ferramenta que o tools/ryujinx-nav chama.
+add_executable(make_batch tests/make_batch.cpp)
+target_link_libraries(make_batch PRIVATE pokehome_core)
+
+add_executable(matriz_rotas tests/matriz_rotas.cpp)
+target_link_libraries(matriz_rotas PRIVATE pokehome_core)
+
+add_executable(dump_box tests/dump_box.cpp)
+target_link_libraries(dump_box PRIVATE pokehome_core)
+
+add_executable(test_commit_plan tests/test_commit_plan.cpp)
+target_link_libraries(test_commit_plan PRIVATE pokehome_core)
+add_test(NAME commit_plan COMMAND test_commit_plan)
+
+# Parser/writer PK4 (spec 126) — a primeira fixture de formato pre-moderno.
+add_executable(test_pk4 tests/test_pk4.cpp)
+target_link_libraries(test_pk4 PRIVATE pokehome_core)
+target_compile_definitions(test_pk4 PRIVATE
+  SYNTH_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/synth/")
+add_test(NAME pk4 COMMAND test_pk4)
+
 # Subida gen3 -> moderno (spec 109).
 add_executable(test_gen3_transfer tests/test_gen3_transfer.cpp)
 target_link_libraries(test_gen3_transfer PRIVATE pokehome_core)
@@ -198,9 +243,9 @@ target_link_libraries(test_box_move PRIVATE pokehome_core)
 add_test(NAME box_move COMMAND test_box_move)
 
 # Ordenacao da lista (spec 024).
-add_executable(test_box_sort tests/test_box_sort.cpp)
-target_link_libraries(test_box_sort PRIVATE pokehome_core)
-add_test(NAME box_sort COMMAND test_box_sort)
+# box_sort saiu na spec 142, junto com a "lista de criaturas" — era a unica
+# tela que o chamava. Um teste verde sobre codigo sem chamador da falsa
+# sensacao de cobertura; o git preserva se a ordenacao voltar a fazer falta.
 
 # Contagem de Pokedex sobre varias fontes (spec 026).
 add_executable(test_dex_count tests/test_dex_count.cpp)
@@ -396,6 +441,11 @@ if(POKEHOME_UI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/borealis/library/CMake
   # fonte, antes de desenhar qualquer coisa.
   set(POKEHOME_UI_SRC src/ui/main.cpp src/ui/updater.cpp
                      src/ui/device_saves.cpp)
+  # Controle remoto da UI (spec 134): so no desktop. O arquivo inteiro esta
+  # sob #ifndef __SWITCH__, mas nem compilar no console — TD-01.
+  if(NOT PLATFORM_SWITCH)
+    list(APPEND POKEHOME_UI_SRC src/ui/ui_script.cpp)
+  endif()
   if(PLATFORM_SWITCH)
     list(APPEND POKEHOME_UI_SRC
       lib/borealis/library/lib/platforms/switch/switch_wrapper.c)
@@ -560,4 +610,30 @@ if(POKEHOME_UI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/borealis/library/CMake
 elseif(POKEHOME_UI)
   message(WARNING
     "lib/borealis ausente — UI desabilitada. Rode: git submodule update --init")
+endif()
+
+# Gerador de Pokemon (spec 144): o nucleo de regra da tela nova. Comeca pela
+# conversao nivel <-> experiencia, que nenhum teste exercitava sozinha.
+add_executable(test_generator tests/test_generator.cpp)
+target_link_libraries(test_generator PRIVATE pokehome_core)
+add_test(NAME generator COMMAND test_generator)
+
+# Controle remoto da UI (spec 134): dirige o app de verdade por um roteiro e
+# afirma o estado, sem ninguem olhar a tela. E o gate que substitui a
+# conferencia humana em tarefa de LOGICA de UI — aparencia continua sendo do
+# dono (TD-03).
+#
+# So no desktop: o modo --script nao existe no build do Switch (TD-01).
+if(NOT PLATFORM_SWITCH AND TARGET pokehome-ui)
+  add_test(NAME ui_script COMMAND ${CMAKE_COMMAND}
+    -DUI_EXE=$<TARGET_FILE:pokehome-ui>
+    -DFIXTURE_EXE=$<TARGET_FILE:make_ui_fixture>
+    -DBASE_SAVE=${CMAKE_CURRENT_SOURCE_DIR}/build/switch-sim/saves/0100554023408000/Amaral/FireRed_e.sav
+    -DSCRIPTS_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts
+    -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/ui-script-run
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/scripts/run_ui_script.cmake)
+  # O app sobe uma janela e roda o fluxo inteiro duas vezes; o padrao de 1500s
+  # do ctest e folgado, mas um roteiro travado tem de morrer aqui e nao no
+  # timeout do CI. O proprio driver ja tem o teto de frames.
+  set_tests_properties(ui_script PROPERTIES TIMEOUT 300)
 endif()

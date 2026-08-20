@@ -16,10 +16,14 @@
 ## O Charmander que você pegou no FireRed pode viajar
 
 Aquele Charmander que você escolheu no seu FireRed original — o mesmo, com o
-mesmo nickname, o mesmo OT, os mesmos IVs — sai da caixa, atravessa Let's Go,
-Scarlet, Legends Arceus, qualquer jogo compatível, e **volta pro FireRed**
-depois. Sem passar pelo PC, sem sair do Switch: as caixas ficam na tela do
-console, do jeito que sempre deveriam ter ficado.
+mesmo nickname, o mesmo OT, os mesmos IVs — sai da caixa, atravessa
+Scarlet, Legends Arceus, Legends Z-A, e **volta pro FireRed** depois. Sem
+passar pelo PC, sem sair do Switch: as caixas ficam na tela do console, do
+jeito que sempre deveriam ter ficado.
+
+Isso não é planejamento: são **30 rotas medidas** entre 6 jogos, cada uma
+conferida na tela. A [tabela de compatibilidade](#compatibilidade--quem-envia-e-quem-recebe)
+diz exatamente quais.
 
 ## Por que existe
 
@@ -61,6 +65,62 @@ que se pareça com o Pokémon HOME oficial.
   modernos, commit explícito sem janela de perda.
 - **Backup e restauração de saves** antes de qualquer escrita.
 
+## Compatibilidade — quem envia e quem recebe
+
+> **O NestBox está em desenvolvimento.** A tabela abaixo é o que está
+> **medido**, não uma promessa. A cada versão a compatibilidade se expande.
+
+**42 rotas fechadas entre 7 jogos.** Cada `✓` significa que a transferência
+foi feita de verdade e o jogo de destino **desenhou** os Pokémon na tela — não
+é dedução a partir do formato do save.
+
+| De \ Para | FireRed | Let's Go | Sword/Shield | BDSP | Legends Arceus | Scarlet/Violet | Legends Z-A |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| **FireRed / LeafGreen** | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Let's Go, Pikachu! / Eevee!** | ✓ | — | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Sword / Shield** | ✓ | ✓ | — | ✓ | ✓ | ✓ | ✓ |
+| **Brilliant Diamond / Shining Pearl** | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
+| **Legends: Arceus** | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ |
+| **Scarlet / Violet** | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| **Legends: Z-A** | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+
+Todos enviam e todos recebem, dentro do que cada jogo conhece.
+
+### Quantos Pokémon passam em cada rota
+
+O número não é falha: é **quantos o jogo de destino conhece**. Um Arceus não
+entra no Legends Z-A porque o Z-A não tem Arceus, e recusá-lo é o
+comportamento certo — o mesmo do HOME oficial.
+
+| Rota | Passam |
+| --- | --- |
+| BDSP → FireRed | 386 — a Pokédex gen 3 inteira |
+| Sword ↔ Scarlet | 420 |
+| BDSP ↔ Scarlet | 353 |
+| BDSP ↔ Sword | 322 |
+| Legends Z-A ↔ Scarlet | 255 |
+| BDSP ↔ Legends Arceus | 207 |
+| Legends Arceus ↔ Sword | 150 |
+
+### Como a gente sabe que funciona
+
+Não basta o save ficar íntegro. Já aconteceu de tudo passar nos testes, o
+arquivo abrir sem erro e **nenhum Pokémon funcionar no jogo** — comparar o
+save consigo mesmo é circular.
+
+Por isso cada rota é conferida **na tela do jogo real**, rodando no emulador,
+olhando a caixa: se aparecer um ovo no lugar do Pokémon, a rota não fecha.
+
+E não é só "não explodiu". Um Pokémon transferido é submetido ao **PkHeX**, o
+verificador de legalidade que a comunidade usa — o mesmo padrão de um Pokémon
+capturado no jogo de verdade. O último lote medido: **2814 de 2817**
+aprovados, com caixas de todas as origens misturadas em cada jogo.
+
+Os três que sobram são casos de borda do lote de teste (um Pokémon de evento
+de raid, dois ovos de nível 1), não das rotas.
+
+---
+
 ## Roadmap — a caminho do Pokémon HOME completo
 
 ### Feito
@@ -77,18 +137,34 @@ que se pareça com o Pokémon HOME oficial.
 - [x] Aviso amarelo de golpe incompatível
 - [x] Memória automática de moveset por jogo (restaura o golpe ao voltar a
       um jogo onde o Pokémon já esteve)
+- [x] **Let's Go, Pikachu! / Eevee!** nas rotas de transferência
+- [x] Mecânicas que viajam junto: tera type derivado na entrada do
+      Scarlet/Violet, habilidade oculta re-derivada por jogo, item segurado
+      devolvido, forma revertida quando depende de item (Giratina Origin)
 
-### Não replicado ainda
+### Nas próximas versões da v1
+
+A compatibilidade cresce a cada release. O que vem primeiro:
 
 - [ ] Troca manual de golpes ao transferir (escolher entre golpes já
       aprendidos — o app hoje só restaura automaticamente pela memória)
 - [ ] Pokédex por jogo (hoje só a global)
 - [ ] Judge (avaliação de IVs)
 
+### v2 — gerador de Pokémon no próprio Switch
+
+A v2 traz um **gerador de Pokémon rodando direto no console**: montar o
+Pokémon na tela do NestBox — espécie, natureza, habilidade, IVs, golpes — e
+depositá-lo num save, sem PC e sem editor externo.
+
+O gerador nasce sobre o mesmo caminho que a transferência já usa hoje: as
+mesmas regras de compatibilidade, o mesmo verificador, a mesma escrita com
+backup. Um Pokémon gerado entra no jogo pela mesma porta por onde um Pokémon
+transferido entra.
+
 ### Fora de escopo (por design)
 
 - Trocas online / GTS / Wonder Box / Room Trade
-- Legalidade de Pokémon gerados — o app move o que já existe, não fabrica
 - Sincronização em nuvem — tudo vive no cartão SD do console
 
 ## Instalação

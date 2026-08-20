@@ -183,9 +183,21 @@ std::optional<std::size_t> FindSaveOffset(const std::vector<std::uint8_t>& file)
   //
   // Exige duas signatures consecutivas espacadas por kSectionSize: um valor
   // isolado pode aparecer por acaso dentro dos dados.
-  if (file.size() < kSaveSize) return std::nullopt;
+  if (file.size() < kSlotSize) return std::nullopt;
 
-  const std::size_t limit = file.size() - kSaveSize;
+  // O limite e por SLOT, nao pelo save inteiro. Exigir `kSaveSize` recusava
+  // save legitimo de jogo pouco jogado: o gen3 alterna os dois slots a cada
+  // gravacao, entao quem salvou uma vez so tem o slot B escrito e o A em
+  // 0xFF. A base cai em 0xE000 e `base + kSaveSize` estoura o arquivo.
+  //
+  // Medido em 2026-08-20 no save que o dono fez no mGBA: 14 assinaturas (as
+  // 14 secoes de UM slot) a partir de 0xEFF8, contra 28 num save com os dois.
+  // O NestBox recusava esse save — bug de produto, nao do teste.
+  //
+  // A protecao contra falso positivo continua: duas assinaturas consecutivas
+  // espacadas por kSectionSize, e o `ReadSlot` depois confere as 14 secoes
+  // uma a uma (id, checksum) antes de marcar o slot como completo.
+  const std::size_t limit = file.size() - kSlotSize;
   for (std::size_t base = 0; base <= limit; ++base) {
     if (ReadU32(file.data() + base + kOffSignature) != kSignature) continue;
     if (base + kSectionSize + kOffSignature + 4 > file.size()) continue;
@@ -206,10 +218,16 @@ std::optional<SaveFile> ParseSave(const std::vector<std::uint8_t>& file) {
 
   auto a = ReadSlot(file, *base);
   auto b = ReadSlot(file, *base + kSlotSize);
-  if (!a || !b) return std::nullopt;
-
-  save.slot_a = std::move(*a);
-  save.slot_b = std::move(*b);
+  // Exigir os DOIS slots recusava save legitimo: o gen3 alterna entre eles a
+  // cada gravacao, e num jogo pouco salvo um dos dois nunca foi escrito —
+  // fica em 0xFF. Medido em 2026-08-20 no save que o dono fez no mGBA: slot A
+  // virgem (sig=0xFFFFFFFF), slot B valido com save_index 1.
+  //
+  // O desempate logo abaixo JA trata "so um completo"; a rejeicao aqui vinha
+  // antes e nunca deixava chegar la.
+  if (!a && !b) return std::nullopt;
+  if (a) save.slot_a = std::move(*a);
+  if (b) save.slot_b = std::move(*b);
 
   // Slot ativo: o de maior save index entre os completos. Um slot incompleto
   // perde independentemente do indice — e o caso de um save interrompido.
@@ -568,13 +586,15 @@ std::uint8_t Gender(const BoxPokemon& mon) {
   return (mon.personality & 0xFF) < ratio ? 1 : 0;
 }
 
-namespace {
-
 // Experiencia necessaria para atingir um nivel, por curva de crescimento.
 // Formulas do jogo; o PKHeX usa tabelas pre-calculadas, aqui calculamos —
 // 100 niveis nao justificam 600 constantes.
+//
+// Publica desde a spec 144: o gerador deixa o jogador escolher o NIVEL, e
+// nenhum formato guarda nivel — e a EXP que precisa sair correta.
 std::uint32_t ExpForLevel(int n, std::uint8_t growth) {
   if (n <= 1) return 0;
+  if (n > 100) n = 100;
   const double x = n;
   switch (growth) {
     case 0:  // Medium Fast
@@ -604,8 +624,6 @@ std::uint32_t ExpForLevel(int n, std::uint8_t growth) {
       return static_cast<std::uint32_t>(x * x * x);
   }
 }
-
-}  // namespace
 
 std::uint8_t LevelFromExp(std::uint32_t exp, std::uint8_t growth_rate) {
   // Busca linear do topo: devolve o maior nivel cuja exigencia cabe na

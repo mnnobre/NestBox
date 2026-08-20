@@ -121,6 +121,7 @@ bool ApplyBoxChanges(savew::SaveData& sd,
       p.current_handler = 1;
       if (p.ht_name.empty()) {
         p.ht_name = sd.trainer_name;
+        p.ht_name_raw = {};  // quem muda o texto zera o raw (spec 145)
         p.ht_friendship = 50;
         p.ht_language = p.language;
       }
