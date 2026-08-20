@@ -142,30 +142,70 @@ de raid, dois ovos de nível 1), não das rotas.
       Scarlet/Violet, habilidade oculta re-derivada por jogo, item segurado
       devolvido, forma revertida quando depende de item (Giratina Origin)
 
-### Nas próximas versões da v1
+### Em desenvolvimento — bugs são esperados
 
-A compatibilidade cresce a cada release. O que vem primeiro:
+O NestBox ainda está sendo construído, e **bugs vão aparecer**. Cada rota de
+transferência é conferida na tela do jogo real antes de fechar, mas nenhum
+teste cobre todos os saves, todos os Pokémon e todas as combinações que
+existem por aí.
 
+**Se algo der errado, [abra uma issue](../../issues).** Um relato com o jogo
+de origem, o jogo de destino e o que aconteceu na tela vale mais que qualquer
+suíte de testes — é o tipo de caso que só aparece no uso real.
+
+E vale o de sempre com qualquer ferramenta que escreve em save: **faça backup
+antes**. O app cria um automaticamente, mas uma cópia sua fora do cartão é o
+que protege contra o caso que ninguém previu.
+
+### Legitimidade é o foco do projeto
+
+Esta é a decisão que mais custou horas de desenvolvimento, e ela orienta todo
+o resto: **um Pokémon que passa pelo NestBox tem de ser indistinguível de um
+Pokémon que nunca saiu do jogo.**
+
+Não é preciosismo. É o que permite que alguém mova o save de volta para a
+sysNAND do console sem levar junto um registro que o jogo — ou um verificador
+— consiga apontar como adulterado.
+
+Por isso cada transferência passa pelas mesmas regras que o Pokémon HOME
+oficial aplica: moveset recalculado pela engine do jogo de destino, tera type
+derivado na entrada, habilidade oculta re-derivada por jogo, item devolvido,
+forma revertida quando depende de item segurado. E cada uma dessas regras foi
+**medida** contra o comportamento oficial, nunca deduzida.
+
+### Próximas versões
+
+- [ ] **Pokédex completa, separada por jogo** — regiões, formas e variantes,
+      em vez da lista global de hoje
+- [ ] **Caixa exclusiva da Pokédex** — os Pokémon da coleção ficam separados
+      dos que você guardou, sem misturar as duas coisas
 - [ ] Troca manual de golpes ao transferir (escolher entre golpes já
       aprendidos — o app hoje só restaura automaticamente pela memória)
-- [ ] Pokédex por jogo (hoje só a global)
 - [ ] Judge (avaliação de IVs)
 
-### v2 — gerador de Pokémon no próprio Switch
+### Criação de Pokémon no console — existe, mas não é o foco
 
-A v2 traz um **gerador de Pokémon rodando direto no console**: montar o
-Pokémon na tela do NestBox — espécie, natureza, habilidade, IVs, golpes — e
-depositá-lo num save, sem PC e sem editor externo.
+O NestBox tem um gerador capaz de montar um Pokémon direto na tela do
+console: espécie, natureza, habilidade, IVs, golpes.
 
-O gerador nasce sobre o mesmo caminho que a transferência já usa hoje: as
-mesmas regras de compatibilidade, o mesmo verificador, a mesma escrita com
-backup. Um Pokémon gerado entra no jogo pela mesma porta por onde um Pokémon
-transferido entra.
+**Ele não é o propósito do projeto, e é por isso que continua desligado.** A
+ideia central do NestBox é preservar a legitimidade do que passa por ele —
+qualquer coisa que crie Pokémon do nada anda na direção oposta. Quando o
+gerador for liberado, será claramente separado do fluxo de transferência,
+para que quem quiser manter o save legítimo simplesmente não o use.
+
+O caminho já existe e é o mesmo da transferência: as mesmas regras de
+compatibilidade, o mesmo verificador, a mesma escrita com backup.
 
 ### Fora de escopo (por design)
 
 - Trocas online / GTS / Wonder Box / Room Trade
 - Sincronização em nuvem — tudo vive no cartão SD do console
+
+---
+
+Espero que a comunidade goste do projeto e que ele cresça — e que isso abra
+espaço para mais conteúdo e mais ferramentas para quem vive nesse ecossistema.
 
 ## Instalação
 
