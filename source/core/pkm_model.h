@@ -166,7 +166,12 @@ std::array<std::uint8_t, 26> ht_name_raw{};
   std::array<std::uint8_t, 16> ribbon_bytes{};
   std::uint8_t ribbon_count_memory = 0;   // [extra] Contest Memory (byte 60)
   std::uint8_t ribbon_count_battle = 0;   // [extra] Battle Memory (byte 61, spec 136)
-  std::uint8_t affixed_ribbon = 0;        // [extra]
+  // 0xFF = NENHUMA fita afixada. O default NAO pode ser 0: esse e o codigo da
+  // Kalos Champion, e um Pokemon que nasce sem passar por um parser sai com
+  // ela pendurada — 117 de 117 numa volta LGPE -> SwSh, reprovados com
+  // "Invalid Affixed Ribbon: Kalos Champion". O PB7 nao guarda este campo,
+  // entao quem sai do Let's Go depende inteiramente deste default.
+  std::uint8_t affixed_ribbon = 0xFF;     // [extra]
 
   // --- Corpo (gen8+) ---------------------------------------------------
   std::uint8_t height_scalar = 0;  // [extra]

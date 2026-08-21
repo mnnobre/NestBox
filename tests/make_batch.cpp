@@ -412,7 +412,7 @@ enum class Qual { kLegit, kErros, kVazio, kFaltantes, kArquivo };
 
 int Escrever(const char* path, Qual qual, int so,
              const std::vector<std::uint32_t>& ja_tem,
-             const char* bin = nullptr) {
+             const char* bin = nullptr, std::size_t desde = 0) {
   std::ifstream in(path, std::ios::binary);
   if (!in) {
     std::fprintf(stderr, "nao abriu %s\n", path);
@@ -426,6 +426,28 @@ int Escrever(const char* path, Qual qual, int so,
   if (!sd) {
     std::fprintf(stderr, "save nao reconhecido: %s\n", path);
     return 1;
+  }
+
+  // O LGPE nao tem lote sintetico: o Let's Go exige que met_location e
+  // met_level casem com um encontro REAL, e cada especie tem o seu (medido na
+  // spec 147: Bulbasaur met=31 lv12, Pikachu met=28 lv5, Mewtwo met=46 lv70).
+  // Nao ha numero generico como o 30012 do PLA — montar sintetico aqui
+  // produzia 153 de 153 ilegais com "Unable to match an encounter", e o jogo
+  // desenhava OVO no lugar do Pokemon.
+  //
+  // Falhar e deliberado. A alternativa — gravar assim mesmo — ja aconteceu, e
+  // o lote invalido passou despercebido porque o diff A->C compara o save
+  // consigo mesmo e nao acusa nada.
+  if (sd->game == savew::Game::kLGPE && qual == Qual::kLegit) {
+    std::fprintf(stderr,
+                 "LGPE nao aceita lote sintetico (spec 147). Gere por "
+                 "encontro real:\n"
+                 "  cd tools/pkhex-lote && dotnet run -- pb7  <lote.bin>  "
+                 "# Pikachu\n"
+                 "  cd tools/pkhex-lote && dotnet run -- pb7e <lote.bin>  "
+                 "# Eevee\n"
+                 "  make_batch --lgpe arquivo <save> <lote.bin>\n");
+    return 2;
   }
 
   const per::Jogo jogo = JogoDoSave(sd->game);
@@ -514,20 +536,25 @@ int Escrever(const char* path, Qual qual, int so,
 
   std::size_t escritos = 0, pulados = 0;
   const std::size_t vagas = sd->box_count * sd->slots_per_box;
-  for (std::size_t i = 0; i < vagas; ++i) {
+  // `desde`: o lote comeca DEPOIS dos Pokemon que ja estao no save. O
+  // `make_batch` foi feito para save descartavel e grava a partir do slot 0 —
+  // num save REAL isso apaga o que estava la. Aconteceu: o Pikachu parceiro
+  // do dono (forma 8, IVs 31) foi sobrescrito pelo Bulbasaur do lote.
+  for (std::size_t i = desde; i < vagas; ++i) {
     const std::size_t b = i / sd->slots_per_box, s = i % sd->slots_per_box;
+    const std::size_t j = i - desde;   // indice DENTRO do lote
     if (limpar) {
       sd->Set(b, s, pkm::Pokemon{});
       continue;
     }
     if (qual == Qual::kArquivo) {
-      if (i >= doArquivo.size()) break;
-      if (!sd->Set(b, s, doArquivo[i])) { ++pulados; continue; }
+      if (j >= doArquivo.size()) break;
+      if (!sd->Set(b, s, doArquivo[j])) { ++pulados; continue; }
       ++escritos;
       continue;
     }
-    if (i >= lista.size()) break;
-    const pkm::Pokemon m = Gerar(lista[i], jogo);
+    if (j >= lista.size()) break;
+    const pkm::Pokemon m = Gerar(lista[j], jogo);
     if (!sd->Set(b, s, m)) {
       ++pulados;
       continue;
@@ -566,8 +593,16 @@ int main(int argc, char* argv[]) {
   // lote matou o jogo sem excecao no log, e a unica forma de saber qual caso
   // e responsavel e um por vez.
   int so = -1;
-  for (int i = 4; i + 1 < argc; ++i)
+  // `--desde N`: o lote comeca no slot N, preservando o que ja esta no save.
+  // Obrigatorio ao escrever num save REAL do dono — sem isto o lote grava a
+  // partir do slot 0 e apaga o que estava la. Aconteceu: o Pikachu parceiro
+  // do dono (forma 8, IVs 31) foi sobrescrito pelo Bulbasaur do lote.
+  std::size_t desde = 0;
+  for (int i = 4; i + 1 < argc; ++i) {
     if (std::strcmp(argv[i], "--so") == 0) so = std::atoi(argv[i + 1]);
+    if (std::strcmp(argv[i], "--desde") == 0)
+      desde = static_cast<std::size_t>(std::atoi(argv[i + 1]));
+  }
 
   // `faltantes`: cada argumento extra e (dex << 8 | forma) do que JA existe.
   std::vector<std::uint32_t> ja_tem;
@@ -583,10 +618,11 @@ int main(int argc, char* argv[]) {
   if (modo == "arquivo") {
     if (argc < 5) {
       std::fprintf(stderr,
-                   "uso: make_batch --<jogo> arquivo <save> <lote.bin>\n");
+                   "uso: make_batch --<jogo> arquivo <save> <lote.bin> "
+                   "[--desde N]\n");
       return 2;
     }
-    return Escrever(path, Qual::kArquivo, so, ja_tem, argv[4]);
+    return Escrever(path, Qual::kArquivo, so, ja_tem, argv[4], desde);
   }
   std::fprintf(stderr, "modo desconhecido: %s\n", modo.c_str());
   return 2;

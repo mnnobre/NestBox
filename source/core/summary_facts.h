@@ -104,4 +104,26 @@ inline std::string BuildMemo(bool fateful, std::uint8_t origin_game,
   return out;
 }
 
+// --- Judge de IVs (o avaliador do jogo) ------------------------------------
+//
+// O avaliador dá um rótulo POR STAT — é assim no jogo, e é onde o número
+// serve: ao lado do stat correspondente, não como nota única do bicho.
+//
+// As faixas são do jogo, não do PkHeX — ele não avalia, só verifica
+// legalidade. Valem de gen6 em diante; o avaliador de gen3/4/5 usa outra
+// escala, e um registro daquelas gerações vai receber rótulo pela escala
+// nova. Pendência conhecida, não medida.
+
+// Rótulo de um IV. Curto de propósito: isto é desenhado seis vezes em volta
+// do hexágono, a ~163px do centro, e uma frase longa invade o rótulo do stat
+// vizinho. A frase inteira do avaliador ("não dá pra ser pior") não cabe.
+inline const char* JudgeIvText(std::uint8_t iv) {
+  if (iv == 31) return "Perfeito";
+  if (iv >= 30) return "Fantástico";
+  if (iv >= 26) return "Muito bom";
+  if (iv >= 16) return "Bom";
+  if (iv >= 1) return "Regular";
+  return "Ruim";
+}
+
 }  // namespace pokehome::summary

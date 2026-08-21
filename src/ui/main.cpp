@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <sys/stat.h>
@@ -57,6 +58,7 @@
 #include "species_facts.h"  // LevelFromExp no deposito (spec 125)
 #include "gen3_transfer.h"  // conversao entre geracoes no gesto (spec 111)
 #include "commit_plan.h"    // decisao pura do commit (spec 128)
+#include "generator.h"      // nucleo de regra do gerador (spec 144)
 #include "transfer_rules.h"  // as regras do HOME chegam ao gesto (spec 140)
 #include "nlog.h"
 #include "save_writer.h"
@@ -71,6 +73,7 @@ namespace cp = pokehome::compat;
 namespace vw = pokehome::view;
 namespace msv = pokehome::moveset;
 namespace cmt = pokehome::commit;  // decisao pura do commit (spec 128)
+namespace evo = pokehome::evo;     // evolucao por troca (spec 146)
 namespace lsn = pokehome::learnset;
 namespace g3x = pokehome::g3x;
 namespace rules = pokehome::rules;  // portao unico da transferencia (spec 140)
@@ -493,18 +496,21 @@ std::string SpritePathBig(const g3::BoxPokemon& mon) {
 // testa o alpha do FRAMEBUFFER, que o fundo opaco do slot ja preencheu). E a
 // mesma solucao que o Selector usa para colorir mascara (spec 084).
 //
-// Cache por caminho: cada sprite gera a silhueta uma vez.
+// Cache por caminho E TOM: a sombra usa 30 (escuro) e a evolucao usa 255
+// (branco), e as duas coexistem — a mesma chave para as duas devolveria a
+// primeira que fosse gerada.
 int SilhouetteHandle(NVGcontext* vg, const std::string& sprite_path, int& iw,
-                     int& ih) {
+                     int& ih, unsigned char tom = 30) {
   struct Cached {
     std::string path;
+    unsigned char tom;
     int handle;
     int w, h;
   };
   static std::vector<Cached> cache;
 
   for (const auto& c : cache) {
-    if (c.path == sprite_path) {
+    if (c.path == sprite_path && c.tom == tom) {
       iw = c.w;
       ih = c.h;
       return c.handle;
@@ -514,7 +520,7 @@ int SilhouetteHandle(NVGcontext* vg, const std::string& sprite_path, int& iw,
   int w, h, n;
   unsigned char* px = stbi_load(sprite_path.c_str(), &w, &h, &n, 4);
   if (!px) {
-    cache.push_back({sprite_path, 0, 0, 0});
+    cache.push_back({sprite_path, tom, 0, 0, 0});
     iw = ih = 0;
     return 0;
   }
@@ -522,12 +528,44 @@ int SilhouetteHandle(NVGcontext* vg, const std::string& sprite_path, int& iw,
   for (int i = 0; i < w * h; ++i) {
     unsigned char* p = px + i * 4;
     if (p[3] == 0) continue;  // fora da silhueta: continua invisivel
-    p[0] = p[1] = p[2] = 30;
+    p[0] = p[1] = p[2] = tom;
   }
 
   const int handle = nvgCreateImageRGBA(vg, w, h, NVG_IMAGE_NEAREST, px);
   stbi_image_free(px);
-  cache.push_back({sprite_path, handle, w, h});
+  cache.push_back({sprite_path, tom, handle, w, h});
+  iw = w;
+  ih = h;
+  return handle;
+}
+
+// Textura de um sprite EM CORES, cacheada por caminho. Mesmo padrao do
+// SilhouetteHandle acima, sem tingir nada. Existe aqui (e nao dentro de uma
+// view) porque a animacao de evolucao (spec 146) precisa dele em escopo de
+// arquivo, alternando com a silhueta branca.
+int SpriteTexture(NVGcontext* vg, const std::string& path, int& iw, int& ih) {
+  struct Cached {
+    std::string path;
+    int handle, w, h;
+  };
+  static std::vector<Cached> cache;
+  for (const auto& c : cache) {
+    if (c.path == path) {
+      iw = c.w;
+      ih = c.h;
+      return c.handle;
+    }
+  }
+  int w, h, n;
+  unsigned char* px = stbi_load(path.c_str(), &w, &h, &n, 4);
+  if (!px) {
+    cache.push_back({path, 0, 0, 0});
+    iw = ih = 0;
+    return 0;
+  }
+  const int handle = nvgCreateImageRGBA(vg, w, h, NVG_IMAGE_NEAREST, px);
+  stbi_image_free(px);
+  cache.push_back({path, handle, w, h});
   iw = w;
   ih = h;
   return handle;
@@ -954,8 +992,12 @@ void ShowContextMenu(
 // BoxActivity a abrem e vem antes no arquivo. `source` nulo desliga a
 // navegacao L/R (tela aberta de uma lista, sem caixa em volta).
 class BoxSource;
+// `session` traz as alteracoes ainda nao gravadas: sem ela o summary mostra o
+// estado da FONTE, e um Pokemon movido/evoluido nesta sessao aparece como
+// "???". Nulo quando nao ha sessao (aberto da lista).
 void ShowSummary(const g3::BoxPokemon& mon, BoxSource* source, std::size_t box,
-                 std::size_t slot);
+                 std::size_t slot, const bx::MoveSession* session = nullptr,
+                 int source_id = 0);
 
 // Pergunta antes de uma acao que descarta estado (spec 020).
 //
@@ -974,6 +1016,33 @@ void ConfirmDialog(const std::string& text, const std::string& cancel_label,
 void NoticeDialog(const std::string& text, const std::string& button_label,
                   std::function<void()> on_close = nullptr,
                   bool cancelable = true);
+
+// Evolucao por troca (spec 146). Declaradas aqui porque a BoxActivity as usa
+// e vem antes no arquivo; as definicoes moram junto das Activities de overlay.
+//
+// Um passo da sequencia: uma evolucao a mostrar. Tipo proprio (nao aninhado na
+// Activity) porque o commit monta a lista antes de a Activity existir.
+struct EvoPasso {
+  int dex_base = 0;
+  int dex_alvo = 0;
+  bool shiny = false;
+};
+
+// Mostra as evolucoes em sequencia, uma esperando a outra acabar, e chama
+// `on_fim` quando a ultima terminar.
+void ShowEvolucoes(std::vector<EvoPasso> passos, std::function<void()> on_fim);
+
+// Pergunta quais candidatos evoluir. `on_escolha` recebe os indices aceitos
+// (vazio = nenhum). Com UM candidato e uma pergunta direta; com varios, uma
+// lista com marcacao — DEC-5.
+struct CandidatoUI {
+  std::string nome_base;
+  std::string nome_alvo;
+  bool origem_aceita_alvo = true;
+  std::string nome_jogo_origem;  // para o aviso; vazio = sem aviso
+};
+void PerguntarEvolucoes(const std::vector<CandidatoUI>& cands,
+                        std::function<void(std::vector<std::size_t>)> on_escolha);
 
 // --- Fonte de dados --------------------------------------------------------
 
@@ -1563,6 +1632,24 @@ lsn::Game LearnsetOfGen3(cp::Game g) {
     case cp::Game::kLeafGreen: return lsn::Game::kLeafGreen;
     default: return lsn::Game::kFireRed;
   }
+}
+
+// O jogo de um save moderno na granularidade de `game_species.h` (spec 146).
+//
+// `MsGameOfSave` acima nao serve: `moveset::Game` agrupa a familia GBA inteira
+// em `kGen3`, e o aviso de "este Pokemon nao volta para o jogo de origem"
+// precisa do jogo exato. Para saves gen3 quem responde e `save->GameId()`,
+// que ja devolve `cp::Game`.
+cp::Game CompatGameOfSave(savew::Game g) {
+  switch (g) {
+    case savew::Game::kSwSh: return cp::Game::kSwordShield;
+    case savew::Game::kSV: return cp::Game::kScarletViolet;
+    case savew::Game::kPLA: return cp::Game::kLegendsArceus;
+    case savew::Game::kBDSP: return cp::Game::kBdsp;
+    case savew::Game::kLGPE: return cp::Game::kLetsGo;
+    case savew::Game::kZA: return cp::Game::kLegendsZA;
+  }
+  return cp::Game::kCount;  // desconhecido: o aviso e omitido, nao chutado
 }
 
 std::uint8_t Gen3OriginCode(cp::Game g) {
@@ -3530,6 +3617,55 @@ const char* PanelArtSlug(const BoxSource* source, bool is_nest) {
   }
 }
 
+// A arte do jogo de ORIGEM de um Pokemon (spec 146, pedido do dono).
+//
+// A barra de status mostrava a arte do PAINEL — sempre o mesmo logo enquanto o
+// cursor andava pela caixa. Como o registro ja carrega `origin_game` (o mesmo
+// campo que alimenta a sigla ao lado), da para mostrar de ONDE ele veio.
+//
+// A numeracao e a mesma de `GameSigla`, e por isso os dois andam juntos: um
+// codigo novo entra nas duas ou a sigla e o logo passam a discordar.
+//
+// Vazio = origem desconhecida ou sem arte cadastrada; quem desenha esconde.
+const char* OriginArtSlug(std::uint8_t game) {
+  switch (game) {
+    case 1: return "pokemon-sapphire";
+    case 2: return "pokemon-ruby";
+    case 3: return "pokemon-emerald";
+    case 4: return "pokemon-firered";
+    case 5: return "pokemon-leafgreen";
+    case 7: return "pokemon-heartgold";
+    case 8: return "pokemon-soulsilver";
+    case 10: return "pokemon-diamond";
+    case 11: return "pokemon-pearl";
+    case 12: return "pokemon-platinum";
+    case 15: return "pokemon-xd-gale-of-darkness";
+    case 20: return "pokemon-white-version";
+    case 21: return "pokemon-black-version";
+    case 22: return "pokemon-white-version-2";
+    case 23: return "pokemon-black-version-2";
+    case 24: return "pokemon-x";
+    case 25: return "pokemon-y";
+    case 26: return "pokemon-alpha-sapphire";
+    case 27: return "pokemon-omega-ruby";
+    case 30: return "pokemon-sun";
+    case 31: return "pokemon-moon";
+    case 32: return "pokemon-ultra-sun";
+    case 33: return "pokemon-ultra-moon";
+    case 42: return "pokemon-lets-go-pikachu";
+    case 43: return "pokemon-lets-go-eevee";
+    case 44: return "pokemon-sword";
+    case 45: return "pokemon-shield";
+    case 47: return "pokemon-legends-arceus";
+    case 48: return "pokemon-brilliant-diamond";
+    case 49: return "pokemon-shining-pearl";
+    case 50: return "pokemon-scarlet";
+    case 51: return "pokemon-violet";
+    case 52: return "pokemon-legends-z-a";
+    default: return "";
+  }
+}
+
 BoxPanel MakePanel(BoxSource* source, bool accent,
                    SlotCell::FocusCallback on_focus, int source_id = 0,
                    bx::MoveSession* session = nullptr,
@@ -4933,6 +5069,9 @@ const NVGcolor kSumUnderOn = nvgRGB(0x2F, 0xB0, 0xA6);   // barra de posicao
 const NVGcolor kSumUnderOff = nvgRGB(0xBF, 0xE3, 0xDE);
 const NVGcolor kSumTag = nvgRGB(0x8F, 0xA2, 0x9A);       // ENG e chevrons
 const NVGcolor kSumRadarBg = nvgRGBA(0xB0, 0xB0, 0xB0, 235);
+// O judge por stat: cinza mais claro que o valor, para o numero seguir sendo
+// o que se le primeiro.
+const NVGcolor kSumJudge = nvgRGBA(0x4A, 0x4A, 0x4A, 230);
 const NVGcolor kSumRadarFill = nvgRGB(0x3D, 0x87, 0xE8);
 const NVGcolor kSumDivider = nvgRGB(0xCB, 0xE9, 0xDA);
 const NVGcolor kSumLink = nvgRGB(0x2E, 0x7F, 0xE0);      // "Pokemon HOME" azul
@@ -4944,8 +5083,10 @@ const NVGcolor kSumFooterText = nvgRGB(0x3B, 0x4A, 0x43);
 class SummaryContent : public brls::Box {
  public:
   SummaryContent(g3::BoxPokemon mon, BoxSource* source, std::size_t box,
-                 std::size_t slot)
-      : mon_(std::move(mon)), source_(source), box_(box), slot_(slot) {
+                 std::size_t slot, const bx::MoveSession* session,
+                 int source_id)
+      : mon_(std::move(mon)), source_(source), box_(box), slot_(slot),
+        session_(session), source_id_(source_id) {
     // Imagens sao filhos ABSOLUTE; todo o resto e desenhado no draw().
     auto make_img = [this](float left, float top, float size) {
       auto* img = new brls::Image();
@@ -4975,6 +5116,20 @@ class SummaryContent : public brls::Box {
     Load(slot_);
   }
 
+  // O conteudo EFETIVO de um slot: a alteracao pendente da sessao, se houver;
+  // senao o que a fonte tem.
+  //
+  // Sem isto o summary lia so a fonte e mostrava o estado ANTIGO: um Pokemon
+  // movido nesta sessao aparecia como "???" / No. 0000, e o evoluido pela
+  // spec 146 nunca aparecia. Bug pre-existente, achado ao testar a evolucao —
+  // vale para qualquer alteracao pendente, nao so evolucao.
+  g3::BoxPokemon SlotEfetivo(std::size_t s) const {
+    const g3::BoxPokemon original = source_ ? source_->At(box_, s)
+                                            : g3::BoxPokemon{};
+    if (!session_) return original;
+    return session_->Get({source_id_, box_, s}, original);
+  }
+
   // L/R: Pokemon anterior/seguinte da caixa, pulando vazios (spec 103).
   bool Nav(int dir) {
     if (!source_) return true;  // aberta da lista: sem caixa em volta
@@ -4982,7 +5137,7 @@ class SummaryContent : public brls::Box {
     std::size_t s = slot_;
     for (std::size_t i = 1; i < n; ++i) {
       s = (s + n + static_cast<std::size_t>(dir)) % n;
-      if (!source_->At(box_, s).empty()) {
+      if (!SlotEfetivo(s).empty()) {
         NLOG_NAV("summary: %s -> slot %zu", dir < 0 ? "L" : "R", s);
         Load(s);
         return true;
@@ -5379,11 +5534,26 @@ class SummaryContent : public brls::Box {
         {"Sp. Def", -163.0f, 84.0f, -163.0f, 117.0f, 5},
         {"Sp. Atk", -164.0f, -84.0f, -164.0f, -51.0f, 4},
     };
+    // O JUDGE e POR STAT, nao pelo total (correcao do dono, 2026-08-21): o
+    // avaliador do jogo da um rotulo a cada IV, e o lugar dele e junto do
+    // stat correspondente. `l.axis` ja e o indice do save (HP, Atk, Def, Spe,
+    // SpA, SpD), a mesma ordem do vetor de IVs.
+    const std::uint8_t* ivs =
+        mon_.modern ? mon_.modern->ivs.data() : mon_.ivs;
     for (const auto& l : kLabels) {
       OutlinedText(vg, cx + l.lx, cy + l.ly, 24.0f, l.label);
       Text(vg, cx + l.vx, cy + l.vy, 26.0f, kSumText,
            NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE,
            std::to_string(stats_.values[l.axis]));
+      // O judge fica do lado OPOSTO ao rotulo do stat. As ancoras da captura
+      // nao seguem "rotulo em cima" uniformemente: em Defense e Sp. Def o
+      // rotulo esta ACIMA do valor (ly=84 < vy=117), em Speed esta ABAIXO
+      // (ly=167 > vy=132). Assumir um lado fixo sobrepos "Sp. Def" e
+      // "Regular" — visto na tela pelo dono.
+      const float dy = (l.ly < l.vy) ? 26.0f : -26.0f;
+      Text(vg, cx + l.vx, cy + l.vy + dy, 18.0f, kSumJudge,
+           NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE,
+           pokehome::summary::JudgeIvText(ivs[l.axis]));
     }
   }
 
@@ -5409,7 +5579,7 @@ class SummaryContent : public brls::Box {
   // Recarrega todos os dados exibidos a partir do slot dado.
   void Load(std::size_t slot) {
     slot_ = slot;
-    if (source_) mon_ = source_->At(box_, slot_);
+    if (source_) mon_ = SlotEfetivo(slot_);
     stats_ = g3::ComputeStats(mon_);
     level_ = mon_.display_level ? mon_.display_level : stats_.level;
     dex_ = mon_.national_dex ? mon_.national_dex
@@ -5488,6 +5658,7 @@ class SummaryContent : public brls::Box {
         pokehome::summary::CharacteristicText(
             pokehome::summary::CharacteristicIndex(ivs, ec));
 
+
     // Imagens.
     sprite_->setImageFromFile(SpritePathBig(mon_));
     const char* ball = BallSprite(mon_.display_ball);
@@ -5546,6 +5717,8 @@ class SummaryContent : public brls::Box {
 
   g3::BoxPokemon mon_;
   BoxSource* source_;
+  const bx::MoveSession* session_ = nullptr;
+  int source_id_ = 0;
   std::size_t box_, slot_;
   g3::BattleStats stats_;
   int level_ = 0, dex_ = 0;
@@ -5567,11 +5740,14 @@ class SummaryActivity : public brls::Activity {
   LogScreen log_screen_{"SummaryActivity"};
 
   SummaryActivity(g3::BoxPokemon mon, BoxSource* source, std::size_t box,
-                  std::size_t slot)
-      : mon_(std::move(mon)), source_(source), box_(box), slot_(slot) {}
+                  std::size_t slot, const bx::MoveSession* session,
+                  int source_id)
+      : mon_(std::move(mon)), source_(source), box_(box), slot_(slot),
+        session_(session), source_id_(source_id) {}
 
   brls::View* createContentView() override {
-    auto* c = new SummaryContent(mon_, source_, box_, slot_);
+    auto* c = new SummaryContent(mon_, source_, box_, slot_, session_,
+                                 source_id_);
     c->setFocusable(true);
     c->registerAction(
         "Voltar", brls::BUTTON_B,
@@ -5592,14 +5768,18 @@ class SummaryActivity : public brls::Activity {
  private:
   g3::BoxPokemon mon_;
   BoxSource* source_;
+  const bx::MoveSession* session_ = nullptr;
+  int source_id_ = 0;
   std::size_t box_, slot_;
 };
 
 void ShowSummary(const g3::BoxPokemon& mon, BoxSource* source, std::size_t box,
-                 std::size_t slot) {
+                 std::size_t slot, const bx::MoveSession* session,
+                 int source_id) {
   NLOG_NAV("abre summary de %s (caixa %zu slot %zu)",
            DisplaySpecies(mon).c_str(), box, slot);
-  brls::Application::pushActivity(new SummaryActivity(mon, source, box, slot));
+  brls::Application::pushActivity(
+      new SummaryActivity(mon, source, box, slot, session, source_id));
 }
 
 // Cartao da visao geral (spec 105): substitui a barra de status enquanto o
@@ -6907,6 +7087,18 @@ class BoxActivity : public brls::Activity {
                      p.source_id == kNestId ? "nestbox" : "save", p.box, cursor_,
                      bx::CursorModeName(mode_),
                      current.empty() ? "vazio" : DisplaySpecies(current).c_str());
+            // EVOLUCAO POR TROCA, no GESTO (spec 146).
+            //
+            // O dono corrigiu o momento em 2026-08-20: perguntar so na hora
+            // de salvar chegava tarde demais. A troca acontece AQUI, quando o
+            // Pokemon entra no NestBox — e e aqui que o jogo perguntaria.
+            //
+            // Custa nada em risco: `Drop` so escreveu no overlay em memoria
+            // (`changes_`), nada foi gravado. Evoluir agora e trocar uma
+            // alteracao pendente por outra; o commit grava o que sobrar.
+            if (dropped && p.source_id == kNestId) {
+              OferecerEvolucao(ref);
+            }
           } else {
             // Pokemon reprovado pelo verificador PODE ser pego (spec 105): o
             // bloqueio e da transferencia, nunca da leitura nem do gesto
@@ -6943,10 +7135,14 @@ class BoxActivity : public brls::Activity {
                     }},
                    // Check Summary do HOME (spec 103).
                    {"Ver detalhes",
-                    [current, src, caixa, slot] {
+                    [this, current, src, caixa, slot, ref] {
                       NLOG_NAV("menu: summary de %s",
                                DisplaySpecies(current).c_str());
-                      ShowSummary(current, src, caixa, slot);
+                      // A sessao vai junto: sem ela o summary leria a FONTE e
+                      // mostraria o estado antigo de quem foi movido ou
+                      // evoluido nesta sessao.
+                      ShowSummary(current, src, caixa, slot, &session_,
+                                  ref.source);
                     }},
                    {"Sair", [] { NLOG_NAV("menu: fechou sem acao"); }}});
               return true;
@@ -7121,18 +7317,22 @@ class BoxActivity : public brls::Activity {
                   }, ""},
                  // O A fica no botao de acao — os tres nao cabem no par A/B.
                  {"Salvar e sair", [this] {
-                    if (CommitNestBox()) {
-                      brls::Application::popActivity();
-                      return;
-                    }
-                    // Falhou: NAO sai. Sair aqui daria a entender que salvou, e
-                    // o usuario perderia o trabalho achando que estava
-                    // guardado.
-                    NoticeDialog(
-                        "Nao foi possivel salvar.\n"
-                        "O save NAO foi alterado — o backup falhou ou o cartao "
-                        "recusou a escrita.",
-                        "Entendi");
+                    // Assincrono desde a spec 146: pode abrir a pergunta da
+                    // evolucao e a sequencia de animacoes antes de terminar.
+                    CommitNestBox([](bool ok) {
+                      if (ok) {
+                        brls::Application::popActivity();
+                        return;
+                      }
+                      // Falhou: NAO sai. Sair aqui daria a entender que
+                      // salvou, e o usuario perderia o trabalho achando que
+                      // estava guardado.
+                      NoticeDialog(
+                          "Nao foi possivel salvar.\n"
+                          "O save NAO foi alterado — o backup falhou ou o "
+                          "cartao recusou a escrita.",
+                          "Entendi");
+                    });
                   }, kGlyphA}});
             return true;
           }
@@ -7354,11 +7554,120 @@ class BoxActivity : public brls::Activity {
   // So o lado do NestBox e gravado: escrever no save do jogo e a v3, com
   // backup obrigatorio, e continua fora de escopo. As alteracoes no painel do
   // save ficam onde sempre estiveram — no overlay, descartadas ao sair.
-  bool CommitNestBox() {
+  // FASE 1: monta o plano e, se houver candidatos a evolucao (spec 146),
+  // PERGUNTA antes de gravar. A resposta e assincrona, por isso o resultado
+  // sai por `on_fim` em vez de `return` — a pergunta abre uma Activity.
+  //
+  // A ordem e: pergunta -> grava -> anima (DEC-6). Animar antes de gravar
+  // deixaria a celebracao mentindo se a escrita falhasse.
+  // Oferece a evolucao por troca do Pokemon que ACABOU de entrar no NestBox
+  // (spec 146). Chamada do gesto de soltar, nao do commit — a troca acontece
+  // no gesto, e e ali que o jogo perguntaria.
+  //
+  // Tudo aqui mexe so no overlay em memoria (`MoveSession::changes_`). Nada e
+  // gravado: o commit, mais tarde, escreve o que sobrar.
+  void OferecerEvolucao(const bx::SlotRef& ref) {
+    auto* nest = dynamic_cast<NestBoxSource*>(nest_);
+    if (!nest) return;
+
+    const g3::BoxPokemon mon =
+        session_.Get(ref, nest->At(ref.box, ref.slot));
+    if (mon.empty() || mon.is_egg) return;  // ovo nao evolui
+
+    const int dex =
+        mon.national_dex ? mon.national_dex : g3::NationalDex(mon.species);
+    const int alvo = evo::AlvoDaTroca(dex);
+    if (alvo == 0) return;
+
+    // O jogo de ORIGEM aceita o evoluido? Em 52 casos medidos nao aceita, e
+    // evoluir prende o Pokemon fora do jogo de onde ele saiu. Avisa, nao
+    // bloqueia (DEC-2).
+    cp::Game origem = cp::Game::kCount;
+    if (auto* m = dynamic_cast<ModernSaveSource*>(save_)) {
+      origem = CompatGameOfSave(m->GameEnum());
+    } else if (auto* s = dynamic_cast<SaveSource*>(save_)) {
+      origem = s->GameId();
+    }
+    const bool aceita =
+        origem == cp::Game::kCount || cp::HasSpecies(origem, alvo);
+
+    NLOG_ACT("  evolucao por troca disponivel: %s -> %s%s",
+             g3::SpeciesNameByDex(dex).c_str(),
+             g3::SpeciesNameByDex(alvo).c_str(),
+             aceita ? "" : "  (NAO volta para este jogo)");
+
+    CandidatoUI ui;
+    ui.nome_base = g3::SpeciesNameByDex(dex);
+    ui.nome_alvo = g3::SpeciesNameByDex(alvo);
+    ui.origem_aceita_alvo = aceita;
+    ui.nome_jogo_origem =
+        origem == cp::Game::kCount ? std::string() : cp::GameName(origem);
+
+    PerguntarEvolucoes({ui}, [this, ref, dex, alvo](std::vector<std::size_t> ok) {
+      if (ok.empty()) {
+        NLOG_ACT("  evolucao recusada: %s continua como esta",
+                 g3::SpeciesNameByDex(dex).c_str());
+        return;
+      }
+      AplicaEvolucaoNoOverlay(ref, alvo);
+      NLOG_ACT("  evolucao aceita: %s -> %s (pendente ate salvar)",
+               g3::SpeciesNameByDex(dex).c_str(),
+               g3::SpeciesNameByDex(alvo).c_str());
+      // A animacao roda AGORA: aqui ela nao celebra uma escrita (nada foi
+      // gravado), celebra o GESTO — que e o que o dono viu acontecer. O
+      // commit posterior grava o resultado.
+      ShowEvolucoes({{dex, alvo, false}}, [this] { Refresh(); });
+    });
+  }
+
+  // Troca a especie do Pokemon no overlay. O commit grava isto depois; ate la
+  // e so a caixa mostrando o evoluido.
+  //
+  // Espelha `cmt::AplicaEvolucoes` (que roda no plano, no caminho do commit).
+  // Sao dois lugares porque sao dois momentos: aqui o dado ainda esta na
+  // sessao, la ele ja virou plano. As REGRAS sao as mesmas — especie, apelido
+  // so se nao apelidado, habilidade pelo slot, met intocado.
+  void AplicaEvolucaoNoOverlay(const bx::SlotRef& ref, int alvo) {
+    auto* nest = dynamic_cast<NestBoxSource*>(nest_);
+    if (!nest) return;
+    g3::BoxPokemon mon = session_.Get(ref, nest->At(ref.box, ref.slot));
+    if (mon.empty()) return;
+
+    mon.national_dex = static_cast<std::uint16_t>(alvo);
+    mon.species_name = g3::SpeciesNameByDex(alvo);
+
+    if (mon.modern) {
+      pkm::Pokemon copy = *mon.modern;
+      copy.species = static_cast<std::uint16_t>(alvo);
+      // O apelido so acompanha quem NUNCA foi apelidado — um Haunter chamado
+      // "Fantasminha" continua "Fantasminha" como Gengar.
+      if (!copy.is_nicknamed) copy.nickname = g3::SpeciesNameByDex(alvo);
+      // Habilidade pelo SLOT, nunca o valor cru: o evoluido tem outra lista.
+      if (const auto* e = pokehome::personal::Find(
+              pokehome::personal::Jogo::kSV, alvo, copy.form)) {
+        switch (copy.ability_number) {
+          case 1: copy.ability = e->ability1; break;
+          case 2: copy.ability = e->ability2; break;
+          case 4: copy.ability = e->ability_hidden; break;
+          default: break;
+        }
+      }
+      // O `met` NAO muda: e a marca de um evoluido por troca de verdade.
+      copy.raw = vw::WriteModern(copy);
+      if (!copy.raw.empty()) {
+        mon.modern = std::make_shared<const pkm::Pokemon>(std::move(copy));
+      }
+    }
+
+    session_.Replace(ref, mon);
+    Refresh();
+  }
+  void CommitNestBox(std::function<void(bool)> on_fim) {
     auto* nest = dynamic_cast<NestBoxSource*>(nest_);
     if (!nest) {
       NLOG_ACT("FALHA salvar: painel do NestBox nao e um NestBoxSource");
-      return false;
+      if (on_fim) on_fim(false);
+      return;
     }
     NLOG_ACT("SALVAR: %zu alteracoes pendentes, renomeado=%d",
              session_.changes().size(), renamed_ ? 1 : 0);
@@ -7384,18 +7693,43 @@ class BoxActivity : public brls::Activity {
       info.formato = modern->PkmFormat();
       info.jogo_ms = MsGameOfSave(modern->GameEnum());
       info.trainer_name = modern->TrainerName();
+      info.jogo_origem = CompatGameOfSave(modern->GameEnum());
     } else if (save) {
       info.kind = cmt::SaveKind::kGen3;
       info.learnset_gen3 = LearnsetOfGen3(save->GameId());
       info.origem_gen3 = Gen3OriginCode(save->GameId());
+      info.jogo_origem = save->GameId();
     }
 
-    const cmt::Plan plan =
-        cmt::BuildPlan(changes, info, &nest->movesets());
+    cmt::Plan plan = cmt::BuildPlan(changes, info, &nest->movesets());
+
     if (!plan.ok()) {
       // Uma falha aqui custa zero: nada foi escrito ainda.
       NLOG_ACT("FALHA salvar: %s — nada foi gravado", plan.error.c_str());
-      return false;
+      if (on_fim) on_fim(false);
+      return;
+    }
+
+    // A evolucao por troca (spec 146) JA foi perguntada no GESTO de soltar,
+    // e o resultado ja esta no overlay da sessao — entao o plano chega aqui
+    // com o evoluido, e nao ha nada a perguntar. `candidatos_evolucao` segue
+    // preenchido (o commit_plan nao sabe que a UI ja perguntou) e e ignorado
+    // de proposito: perguntar de novo aqui seria perguntar duas vezes pelo
+    // mesmo Pokemon.
+    Gravar(std::move(plan), {}, std::move(on_fim));
+    return;
+  }
+
+  // FASE 2: escreve. Recebe o plano JA com as evolucoes aplicadas e, quando a
+  // escrita da certo, roda a sequencia de animacoes (DEC-6).
+  void Gravar(cmt::Plan plan, std::vector<EvoPasso> passos,
+              std::function<void(bool)> on_fim) {
+    auto* nest = dynamic_cast<NestBoxSource*>(nest_);
+    auto* save = dynamic_cast<SaveSource*>(save_);
+    auto* modern = dynamic_cast<ModernSaveSource*>(save_);
+    if (!nest) {
+      if (on_fim) on_fim(false);
+      return;
     }
 
     // --- EXECUTAR ------------------------------------------------------
@@ -7418,7 +7752,7 @@ class BoxActivity : public brls::Activity {
     if (!SaveNestBox(nest->data())) {
       NLOG_ACT("FALHA salvar: SaveNestBox recusou. O save NAO foi tocado.");
       nest->Load(nest_before);
-      return false;
+      { if (on_fim) on_fim(false); return; }
     }
 
     // BACKUP OBRIGATORIO antes de tocar no save (spec 032). Falhou, nao
@@ -7441,13 +7775,13 @@ class BoxActivity : public brls::Activity {
         if (!BackupSave(save->path(), save->bytes())) {
           NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
           rollback();
-          return false;
+          { if (on_fim) on_fim(false); return; }
         }
         if (!save->WriteChanges(plan.save_changes)) {
           NLOG_ACT("FALHA salvar: WriteChanges recusou em \"%s\" (%zu slots)",
                    save->path().c_str(), plan.save_changes.size());
           rollback();
-          return false;
+          { if (on_fim) on_fim(false); return; }
         }
         NLOG_ACT("  save gravado: \"%s\"", save->path().c_str());
       } else if (modern) {
@@ -7456,13 +7790,13 @@ class BoxActivity : public brls::Activity {
         if (!BackupSave(modern->backup_label(), modern->bytes())) {
           NLOG_ACT("FALHA salvar: backup recusou. O save NAO foi tocado.");
           rollback();
-          return false;
+          { if (on_fim) on_fim(false); return; }
         }
         if (!modern->WriteChanges(plan.modern_changes)) {
           NLOG_ACT("FALHA salvar: WriteChanges moderno recusou (%zu slots)",
                    plan.modern_changes.size());
           rollback();
-          return false;
+          { if (on_fim) on_fim(false); return; }
         }
         NLOG_ACT("  save moderno gravado: \"%s\"",
                  modern->backup_label().c_str());
@@ -7474,7 +7808,15 @@ class BoxActivity : public brls::Activity {
     // por cima do save ja atualizado, mostrando o estado duas vezes.
     session_.Discard();
     renamed_ = false;
-    return true;
+    // A animacao roda DEPOIS da escrita confirmada (DEC-6). `on_fim(true)`
+    // so dispara quando a ultima acabar, para quem chamou nao fechar a
+    // caixa por cima da cena.
+    if (!passos.empty()) {
+      ShowEvolucoes(std::move(passos), [on_fim] { if (on_fim) on_fim(true); });
+      return;
+    }
+    if (on_fim) on_fim(true);
+    return;
   }
 
   // Redesenha as duas grades. Chamado ao trocar de caixa, nao a cada
@@ -7781,10 +8123,18 @@ class BoxActivity : public brls::Activity {
     gameChip_->setVisibility(brls::Visibility::VISIBLE);
     statMarks_->setVisibility(brls::Visibility::VISIBLE);
 
-    // Mesma tabela do rodape do cartao (spec 101): PanelArtSlug e a fonte
-    // unica, e `accent` marca o painel do NestBox.
-    const BoxPanel& ap = Active();
-    const char* slug = PanelArtSlug(ap.source, ap.source_id == kNestId);
+    // A arte do jogo de ORIGEM deste Pokemon (spec 146, pedido do dono):
+    // antes mostrava o logo do PAINEL, que nao muda enquanto o cursor anda.
+    // O dado ja estava no registro — e o mesmo `origin_game` da sigla ao lado.
+    //
+    // Origem desconhecida (registro gen3 antigo, ou codigo que a tabela nao
+    // cobre) cai no logo do painel, que era o comportamento anterior: melhor
+    // um logo generico do que espaco vazio.
+    const char* slug = OriginArtSlug(mon.origin_game);
+    if (!*slug) {
+      const BoxPanel& ap = Active();
+      slug = PanelArtSlug(ap.source, ap.source_id == kNestId);
+    }
     if (*slug) {
       // LogoPath() vive mais abaixo no arquivo (tela de saves); monta igual.
       statLogo_->setImageFromFile(std::string(POKEHOME_UI_ASSETS) + "games/" +
@@ -8997,6 +9347,534 @@ brls::View* ContextMenuActivity::createContentView() {
 
 // Abre o menu de contexto. O ultimo item recebe o glifo de B — e o "Sair",
 // que faz o mesmo que apertar B.
+// --- Evolucao por troca: a pergunta (spec 146) ------------------------------
+//
+// DEC-5 (agente, 2026-08-20): com UM candidato e uma pergunta direta na
+// MessageBox; com VARIOS e uma lista com marcacao individual.
+//
+// A marcacao individual e o superconjunto: se um dia o dono preferir
+// "tudo ou nada", basta trocar as linhas por um botao so. O contrario custaria
+// refazer a tela. E, como o aviso de "nao volta para este jogo" e POR PAR, ele
+// so aparece de verdade quando cada linha pode ser decidida sozinha.
+
+// Uma linha da lista: o par, o aviso, e o estado marcado/desmarcado.
+class EvolucaoRow : public brls::Box {
+ public:
+  EvolucaoRow(const CandidatoUI& c, bool marcado, std::function<void(bool)> on_toggle)
+      : marcado_(marcado), on_toggle_(std::move(on_toggle)) {
+    setAxis(brls::Axis::ROW);
+    setSize(brls::Size(640.0f, 56.0f));
+    setCornerRadius(14.0f);
+    setBackgroundColor(kWhite);
+    setAlignItems(brls::AlignItems::CENTER);
+    setJustifyContent(brls::JustifyContent::FLEX_START);
+    setPaddingLeft(56.0f);  // espaco da marca, desenhada fora do layout
+    setPaddingRight(20.0f);
+    setMarginBottom(10.0f);
+    setFocusable(true);
+    setHideHighlight(true);
+
+    label_ = new brls::Label();
+    label_->setText(c.nome_base + "  ->  " + c.nome_alvo);
+    label_->setFontSize(21);
+    label_->setTextColor(kTextPrimary);
+    addView(label_);
+
+    // O aviso dos 52 casos medidos: evoluir aqui impede a volta ao jogo de
+    // ORIGEM. Fica na propria linha porque e uma propriedade DESTE par, nao
+    // da operacao inteira.
+    if (!c.origem_aceita_alvo) {
+      aviso_ = new brls::Label();
+      aviso_->setText("nao volta para " + c.nome_jogo_origem);
+      aviso_->setFontSize(16);
+      aviso_->setTextColor(kCursorRed);
+      aviso_->setMarginLeft(16.0f);
+      addView(aviso_);
+    }
+
+    registerClickAction([this](brls::View*) {
+      marcado_ = !marcado_;
+      if (on_toggle_) on_toggle_(marcado_);
+      return true;
+    });
+    addGestureRecognizer(new brls::TapGestureRecognizer(this));
+  }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h,
+            brls::Style style, brls::FrameContext* ctx) override {
+    brls::Box::draw(vg, x, y, w, h, style, ctx);
+
+    // A MARCA, desenhada a mao: um quadrado arredondado com um tique quando
+    // ligado. Fora do layout para nao empurrar o texto.
+    const float bx = x + 18.0f, by = y + h / 2.0f - 13.0f, bs = 26.0f;
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, bx, by, bs, bs, 7.0f);
+    nvgFillColor(vg, marcado_ ? kSelectorTeal : nvgRGBA(0, 0, 0, 22));
+    nvgFill(vg);
+    if (marcado_) {
+      nvgBeginPath(vg);
+      nvgMoveTo(vg, bx + 6.5f, by + 13.5f);
+      nvgLineTo(vg, bx + 11.0f, by + 18.5f);
+      nvgLineTo(vg, bx + 19.5f, by + 7.5f);
+      nvgStrokeColor(vg, kWhite);
+      nvgStrokeWidth(vg, 3.0f);
+      nvgLineCap(vg, NVG_ROUND);
+      nvgLineJoin(vg, NVG_ROUND);
+      nvgStroke(vg);
+    }
+
+    if (!focused_) return;
+    ++tick_;
+    Selector::Draw(vg, Selector::Variant::kPrimary, x + 6.0f, y + h / 2.0f, h,
+                   tick_);
+  }
+
+  void onFocusGained() override {
+    brls::Box::onFocusGained();
+    focused_ = true;
+    setBackgroundColor(kMenuAmber);
+    label_->setTextColor(kWhite);
+#ifndef __SWITCH__
+    g_script_focused_button = label_->getFullText();
+#endif
+  }
+  void onFocusLost() override {
+    brls::Box::onFocusLost();
+    focused_ = false;
+    setBackgroundColor(kWhite);
+    label_->setTextColor(kTextPrimary);
+  }
+
+ private:
+  brls::Label* label_ = nullptr;
+  brls::Label* aviso_ = nullptr;
+  bool marcado_ = true;
+  bool focused_ = false;
+  unsigned tick_ = 0;
+  std::function<void(bool)> on_toggle_;
+};
+
+// A tela da lista, quando ha mais de um candidato.
+class EvolucaoEscolhaActivity : public brls::Activity {
+ public:
+  LogScreen log_screen_{"EvolucaoEscolhaActivity"};
+
+  EvolucaoEscolhaActivity(std::vector<CandidatoUI> cands,
+                          std::function<void(std::vector<std::size_t>)> on_escolha)
+      : cands_(std::move(cands)), on_escolha_(std::move(on_escolha)) {
+    // Todos marcados por padrao: quem abriu a tela ja demonstrou querer
+    // evoluir. Desmarcar e a excecao, e o aviso vermelho aponta onde olhar.
+    marcados_.assign(cands_.size(), true);
+  }
+
+  brls::View* createContentView() override;
+  bool isTranslucent() override { return true; }
+
+ private:
+  std::vector<CandidatoUI> cands_;
+  std::vector<bool> marcados_;  // paralelo a cands_
+  std::function<void(std::vector<std::size_t>)> on_escolha_;
+};
+
+brls::View* EvolucaoEscolhaActivity::createContentView() {
+  auto* root = new brls::Box(brls::Axis::COLUMN);
+  root->setBackgroundColor(nvgRGBA(0x3C, 0x4C, 0x44, 150));
+  root->setAlignItems(brls::AlignItems::CENTER);
+  root->setJustifyContent(brls::JustifyContent::CENTER);
+
+  auto* panel = new brls::Box(brls::Axis::COLUMN);
+  panel->setBackgroundColor(kStatusBodyBg);
+  panel->setCornerRadius(18.0f);
+  panel->setPadding(28, 28, 24, 28);
+  panel->setAlignItems(brls::AlignItems::CENTER);
+
+  auto* titulo = new brls::Label();
+  titulo->setText(std::to_string(cands_.size()) +
+                  " Pokemon podem evoluir por troca");
+  titulo->setFontSize(25);
+  titulo->setTextColor(kTextPrimary);
+  titulo->setMarginBottom(6.0f);
+  panel->addView(titulo);
+
+  auto* sub = new brls::Label();
+  sub->setText("Escolha quais evoluir. A troca e definitiva.");
+  sub->setFontSize(17);
+  sub->setTextColor(kTextSecondary);
+  sub->setMarginBottom(18.0f);
+  panel->addView(sub);
+
+  brls::View* first = nullptr;
+  for (std::size_t i = 0; i < cands_.size(); ++i) {
+    auto* row = new EvolucaoRow(cands_[i], marcados_[i],
+                                [this, i](bool on) { marcados_[i] = on; });
+    panel->addView(row);
+    if (!first) first = row;
+  }
+
+  // Os botoes. O SEGURO vem primeiro e recebe o foco (spec 020): o gesto
+  // apressado tem de ser o inofensivo, e aqui o inofensivo e nao evoluir.
+  auto* barra = new brls::Box(brls::Axis::ROW);
+  barra->setMarginTop(14.0f);
+  barra->setJustifyContent(brls::JustifyContent::CENTER);
+
+  auto fecha = [this](bool aceitar) {
+    std::vector<std::size_t> aceitos;
+    if (aceitar) {
+      for (std::size_t i = 0; i < marcados_.size(); ++i)
+        if (marcados_[i]) aceitos.push_back(i);
+    }
+    auto cb = on_escolha_;
+    on_escolha_ = nullptr;
+    brls::Application::popActivity(brls::TransitionAnimation::FADE,
+                                   [cb, aceitos] {
+                                     if (cb) cb(aceitos);
+                                   });
+  };
+
+  auto mk = [&](const std::string& txt, bool aceitar) {
+    auto* b = new brls::Box(brls::Axis::ROW);
+    b->setHeight(52.0f);
+    b->setPaddingLeft(30.0f);
+    b->setPaddingRight(30.0f);
+    b->setCornerRadius(26.0f);
+    b->setBackgroundColor(kWhite);
+    b->setAlignItems(brls::AlignItems::CENTER);
+    b->setMarginLeft(8.0f);
+    b->setMarginRight(8.0f);
+    b->setFocusable(true);
+    auto* l = new brls::Label();
+    l->setText(txt);
+    l->setFontSize(20);
+    l->setTextColor(kTextPrimary);
+    b->addView(l);
+    b->registerClickAction([this, aceitar, fecha](brls::View*) {
+      fecha(aceitar);
+      return true;
+    });
+    b->addGestureRecognizer(new brls::TapGestureRecognizer(b));
+    return b;
+  };
+
+  auto* nenhum = mk("Nao evoluir nenhum", false);
+  barra->addView(nenhum);
+  barra->addView(mk("Evoluir os marcados", true));
+  panel->addView(barra);
+
+  root->addView(panel);
+  brls::Application::giveFocus(nenhum);
+  return root;
+}
+
+void PerguntarEvolucoes(
+    const std::vector<CandidatoUI>& cands,
+    std::function<void(std::vector<std::size_t>)> on_escolha) {
+  if (cands.empty()) {
+    if (on_escolha) on_escolha({});
+    return;
+  }
+
+  if (cands.size() == 1) {
+    // UM so: pergunta direta, sem lista para marcar (DEC-5).
+    const CandidatoUI& c = cands[0];
+    std::string texto = c.nome_base + " pode evoluir para " + c.nome_alvo +
+                        " agora que foi trocado.\n\nEvoluir?";
+    if (!c.origem_aceita_alvo) {
+      texto += "\n\nAtencao: " + c.nome_alvo + " nao existe em " +
+               c.nome_jogo_origem +
+               ".\nSe evoluir, ele nao podera voltar para esse jogo.";
+    }
+    // O botao seguro (nao evoluir) vem primeiro e recebe o foco.
+    MessageBox::Show(texto,
+                     {{"Agora nao", [on_escolha] {
+                         if (on_escolha) on_escolha({});
+                       }, kGlyphB},
+                      {"Evoluir", [on_escolha] {
+                         if (on_escolha) on_escolha({0});
+                       }, ""}});
+    return;
+  }
+
+  brls::Application::pushActivity(
+      new EvolucaoEscolhaActivity(cands, std::move(on_escolha)),
+      brls::TransitionAnimation::FADE);
+}
+// --- Evolucao por troca: a animacao (spec 146) ------------------------------
+//
+// O jogo NUNCA dispara o evento de evolucao para um Pokemon que o NestBox
+// escreveu no save: a evolucao por troca acontece durante a troca, e nos
+// gravamos direto. Entao esta animacao nao reproduz nada do jogo — e cerimonia
+// do NestBox para um evento que so existe aqui (DEC-3 da spec).
+//
+// Prototipada em `docs/telas/evolucao-haunter.html`, 1:1 em 1280x720, onde os
+// tempos foram ajustados. Os numeros abaixo saem de la.
+//
+// DEC-6 (agente, 2026-08-20): roda DEPOIS de gravar. Celebrar antes da escrita
+// deixaria a animacao mentindo se o save falhasse.
+class EvolucaoActivity : public brls::Activity {
+ public:
+  LogScreen log_screen_{"EvolucaoActivity"};
+
+  using Passo = EvoPasso;
+
+  EvolucaoActivity(std::vector<Passo> passos, std::function<void()> on_fim)
+      : passos_(std::move(passos)), on_fim_(std::move(on_fim)) {}
+
+  brls::View* createContentView() override;
+
+  // A caixa atras continua visivel — mesma regra da MessageBoxActivity
+  // (spec 044). Sem isto o borealis para na primeira Activity nao-translucida
+  // e o fundo sai branco.
+  bool isTranslucent() override { return true; }
+
+ private:
+  std::vector<Passo> passos_;
+  std::function<void()> on_fim_;
+};
+
+// A cena de UMA evolucao. Varias em sequencia: a view avanca sozinha para o
+// proximo passo, que e o "um esperando o outro acabar" que o dono pediu.
+class EvolucaoView : public brls::Box {
+ public:
+  // Tempos em FRAMES, como o resto do app (o borealis conta `++tick_` por
+  // frame desenhado, nao por milissegundo). Valores do mockup HTML.
+  static constexpr int kEntrada = 30;   // sobe e cresce
+  static constexpr int kTrocaIni = 26;  // frames na 1a troca de silhueta
+  static constexpr int kTrocaFim = 4;   // frames na ultima (acelera)
+  static constexpr int kTrocas = 14;    // quantas trocas
+  static constexpr int kFlash = 30;     // clarao no pico
+  static constexpr int kRevela = 90;    // o evoluido em cores
+  static constexpr int kParticulas = 40;
+
+  EvolucaoView(std::vector<EvoPasso> passos,
+               std::function<void()> on_fim)
+      : passos_(std::move(passos)), on_fim_(std::move(on_fim)) {
+    setFocusable(true);
+    // B nao pula: quando isto roda a evolucao JA foi gravada (DEC-6), entao
+    // nao ha o que cancelar. Deixar B fechar daria impressao de desfazer.
+  }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h,
+            brls::Style style, brls::FrameContext* ctx) override {
+    if (passo_ >= passos_.size()) return;
+    const auto& p = passos_[passo_];
+
+    // Veu escuro: a caixa atras some sem sumir, e o branco da silhueta ganha
+    // contraste. O fundo AZUL dos jogos ficou de fora — o gradiente verde e a
+    // identidade do app, e a pesquisa nao confirmou o fundo dos modernos.
+    nvgBeginPath(vg);
+    nvgRect(vg, x, y, w, h);
+    nvgFillColor(vg, nvgRGBA(0x1E, 0x2A, 0x24, 210));
+    nvgFill(vg);
+
+    const std::string path_base = SpritePathFor(p.dex_base, p.shiny, true);
+    const std::string path_alvo = SpritePathFor(p.dex_alvo, p.shiny, true);
+
+    const float cx = x + w / 2.0f;
+    const float cy = y + h / 2.0f - 30.0f;
+    const float kEscala = 1.35f;
+
+    const int swap_total = SwapTotal();
+    const int total = kEntrada + swap_total + kFlash + kRevela;
+
+    float escala = 1.0f, dy = 0.0f, alpha = 1.0f, flash_a = 0.0f;
+    bool usar_silhueta = false, mostrar_alvo = false;
+
+    if (t_ < kEntrada) {
+      // ENTRADA: sobe 40px e cresce 0.6 -> 1.0, ease-out cubico.
+      const float pr = static_cast<float>(t_) / kEntrada;
+      const float e = 1.0f - std::pow(1.0f - pr, 3.0f);
+      escala = 0.6f + 0.4f * e;
+      dy = (1.0f - e) * 40.0f;
+      alpha = e;
+    } else if (t_ < kEntrada + swap_total) {
+      // TROCAS: silhueta BRANCA alternando as duas especies, acelerando.
+      usar_silhueta = true;
+      int acc = kEntrada, idx = 0;
+      for (int i = 0; i < kTrocas; ++i) {
+        const int len = PassoLen(i);
+        if (t_ < acc + len) {
+          idx = i;
+          break;
+        }
+        acc += len;
+        idx = i;
+      }
+      mostrar_alvo = (idx % 2) != 0;
+      const float prog =
+          static_cast<float>(t_ - kEntrada) / static_cast<float>(swap_total);
+      escala = 1.0f + (kEscala - 1.0f) * prog * 0.45f;
+    } else if (t_ < kEntrada + swap_total + kFlash) {
+      // FLASH: clarao branco, silhueta do ALVO no pico.
+      usar_silhueta = true;
+      mostrar_alvo = true;
+      const float pr = static_cast<float>(t_ - kEntrada - swap_total) / kFlash;
+      escala = 1.0f + (kEscala - 1.0f) *
+                          (0.45f + 0.55f * std::sin(pr * NVG_PI / 2.0f));
+      flash_a = pr < 0.5f ? pr * 2.0f : (1.0f - pr) * 2.0f;
+    } else {
+      // REVELACAO: o evoluido em cores, escala voltando a 1.
+      mostrar_alvo = true;
+      const float pr = std::min(
+          1.0f,
+          static_cast<float>(t_ - kEntrada - swap_total - kFlash) / kRevela);
+      escala = kEscala - (kEscala - 1.0f) * std::min(1.0f, pr * 3.0f);
+      flash_a = std::max(0.0f, 0.35f - pr * 0.9f);
+    }
+
+    const std::string& path = mostrar_alvo ? path_alvo : path_base;
+    const float sz = 256.0f * escala;
+    const float sx = cx - sz / 2.0f;
+    const float sy = cy - sz / 2.0f + dy;
+
+    int iw = 0, ih = 0, handle = 0;
+    if (usar_silhueta) {
+      // A peca nova da spec: a MESMA tecnica da sombra (spec 085), tingindo de
+      // BRANCO em vez de escuro. Sem isto a troca vira um piscar de dois
+      // sprites coloridos, que nao le como evolucao.
+      handle = SilhouetteHandle(vg, path, iw, ih, 255);
+    } else {
+      handle = SpriteTexture(vg, path, iw, ih);
+    }
+    if (handle != 0) {
+      nvgGlobalAlpha(vg, alpha);
+      NVGpaint pt = nvgImagePattern(vg, sx, sy, sz, sz, 0, handle, 1.0f);
+      nvgBeginPath(vg);
+      nvgRect(vg, sx, sy, sz, sz);
+      nvgFillPaint(vg, pt);
+      nvgFill(vg);
+      nvgGlobalAlpha(vg, 1.0f);
+    }
+
+    // Particulas: nascem UMA vez, no comeco do flash. Angulo aureo em vez de
+    // rand() — assim a animacao sai igual toda vez e da para conferir na tela
+    // sem perseguir variacao.
+    if (t_ >= kEntrada + swap_total) {
+      if (!semeou_) {
+        parts_.clear();
+        for (int i = 0; i < kParticulas; ++i) {
+          const float a = static_cast<float>(i) * 2.399f;
+          const float sp = 2.2f + static_cast<float>(i % 7) * 0.55f;
+          parts_.push_back({cx, cy, std::cos(a) * sp, std::sin(a) * sp - 1.2f,
+                            2.0f + static_cast<float>(i % 4), 1.0f});
+        }
+        semeou_ = true;
+      }
+      for (auto& q : parts_) {
+        if (q.vida <= 0.0f) continue;
+        q.x += q.vx;
+        q.y += q.vy;
+        q.vy += 0.06f;
+        q.vida -= 0.012f;
+        if (q.vida <= 0.0f) continue;
+        nvgGlobalAlpha(vg, std::max(0.0f, q.vida));
+        nvgBeginPath(vg);
+        nvgCircle(vg, q.x, q.y, q.r);
+        nvgFillColor(vg, kWhite);
+        nvgFill(vg);
+        nvgGlobalAlpha(vg, 1.0f);
+      }
+    }
+
+    if (flash_a > 0.001f) {
+      nvgBeginPath(vg);
+      nvgRect(vg, x, y, w, h);
+      nvgFillColor(vg,
+                   nvgRGBA(255, 255, 255, static_cast<int>(flash_a * 255.0f)));
+      nvgFill(vg);
+    }
+
+    // O texto. Na revelacao usa o padrao dos jogos, medido na pesquisa:
+    // "Congratulations! Your X evolved into Y!".
+    const std::string nome_base = g3::SpeciesNameByDex(p.dex_base);
+    const std::string nome_alvo = g3::SpeciesNameByDex(p.dex_alvo);
+    std::string texto;
+    if (t_ < kEntrada + swap_total) {
+      texto = nome_base + " esta evoluindo!";
+    } else if (t_ >= kEntrada + swap_total + kFlash) {
+      texto = "Parabens! " + nome_base + " evoluiu para " + nome_alvo + "!";
+    }
+    if (!texto.empty()) {
+      nvgFontFaceId(vg, brls::Application::getDefaultFont());
+      nvgFontSize(vg, 26.0f);
+      nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+      nvgFillColor(vg, kWhite);
+      nvgText(vg, cx, y + h - 150.0f, texto.c_str(), nullptr);
+    }
+
+    // Contador "3 de 7", so quando ha varios — o dono pediu a sequencia, e sem
+    // isto nao da para saber quantos faltam.
+    if (passos_.size() > 1) {
+      const std::string cont = std::to_string(passo_ + 1) + " de " +
+                               std::to_string(passos_.size());
+      nvgFontFaceId(vg, brls::Application::getDefaultFont());
+      nvgFontSize(vg, 19.0f);
+      nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+      nvgFillColor(vg, nvgRGBA(255, 255, 255, 170));
+      nvgText(vg, cx, y + h - 112.0f, cont.c_str(), nullptr);
+    }
+
+    ++t_;
+    if (t_ >= total) {
+      // Proximo da fila, ou fecha.
+      ++passo_;
+      t_ = 0;
+      semeou_ = false;
+      parts_.clear();
+      if (passo_ >= passos_.size()) {
+        auto fim = on_fim_;
+        on_fim_ = nullptr;
+        brls::Application::popActivity(brls::TransitionAnimation::FADE,
+                                       fim ? fim : [] {});
+      }
+    }
+  }
+
+ private:
+  struct Particula {
+    float x, y, vx, vy, r, vida;
+  };
+
+  // Frames da troca `i`: interpola linear de kTrocaIni ate kTrocaFim. E o que
+  // da a sensacao de acelerar sem precisar de curva nenhuma.
+  static int PassoLen(int i) {
+    const float t =
+        kTrocas <= 1 ? 1.0f : static_cast<float>(i) / (kTrocas - 1);
+    return static_cast<int>(
+        std::lround(kTrocaIni + (kTrocaFim - kTrocaIni) * t));
+  }
+  static int SwapTotal() {
+    int n = 0;
+    for (int i = 0; i < kTrocas; ++i) n += PassoLen(i);
+    return n;
+  }
+
+  std::vector<EvoPasso> passos_;
+  std::function<void()> on_fim_;
+  std::size_t passo_ = 0;
+  int t_ = 0;
+  bool semeou_ = false;
+  std::vector<Particula> parts_;
+};
+
+brls::View* EvolucaoActivity::createContentView() {
+  auto* root = new brls::Box(brls::Axis::COLUMN);
+  auto* view = new EvolucaoView(passos_, on_fim_);
+  view->setGrow(1.0f);
+  root->addView(view);
+  brls::Application::giveFocus(view);
+  return root;
+}
+
+void ShowEvolucoes(std::vector<EvoPasso> passos,
+                   std::function<void()> on_fim) {
+  if (passos.empty()) {
+    if (on_fim) on_fim();
+    return;
+  }
+  brls::Application::pushActivity(
+      new EvolucaoActivity(std::move(passos), std::move(on_fim)),
+      brls::TransitionAnimation::FADE);
+}
 void ShowContextMenu(
     brls::Rect anchor,
     std::vector<std::pair<std::string, std::function<void()>>> items) {
@@ -9078,7 +9956,15 @@ class MenuButton : public brls::Box {
 
     counter_->setTextView(counterText_);
     counter_->addView(counterText_);
-    addView(counter_);
+    // TD-02 da spec 144: rotulo vazio = botao SO com titulo. O GERADOR nao
+    // tem numero que faca sentido mostrar sem persistir um contador novo, e
+    // uma pilula "Criados: 0" que nunca muda e pior que pilula nenhuma.
+    // Sem a pilula o titulo fica sozinho, entao ele se centra no botao.
+    if (counterLabel.empty()) {
+      counter_->setVisibility(brls::Visibility::GONE);
+    } else {
+      addView(counter_);
+    }
 
     // registerClickAction, nao registerAction(BUTTON_A): o borealis ja trata A
     // como clique na View focada, e registrar o botao direto nao dispara.
@@ -9095,8 +9981,10 @@ class MenuButton : public brls::Box {
     brls::Box::onFocusGained();
     setBackgroundColor(kMenuAmber);
     title_->setTextColor(kWhite);
-    counter_->setBackgroundColor(kWhite);
-    counterText_->setTextColor(kTextPrimary);
+    if (counter_->getVisibility() != brls::Visibility::GONE) {
+      counter_->setBackgroundColor(kWhite);
+      counterText_->setTextColor(kTextPrimary);
+    }
     if (on_focus_) on_focus_();
   }
 
@@ -9104,11 +9992,13 @@ class MenuButton : public brls::Box {
     brls::Box::onFocusLost();
     setBackgroundColor(kWhite);
     title_->setTextColor(kTextPrimary);
-    counter_->setBackgroundColor(kPillTeal);
-    counterText_->setTextColor(kWhite);
-    // Desloca o texto para abrir espaco a esquerda para a pokebola; o
-    // conjunto (bola + texto) fica centrado na pilula.
-    counterText_->setMarginLeft(30);
+    if (counter_->getVisibility() != brls::Visibility::GONE) {
+      counter_->setBackgroundColor(kPillTeal);
+      counterText_->setTextColor(kWhite);
+      // Desloca o texto para abrir espaco a esquerda para a pokebola; o
+      // conjunto (bola + texto) fica centrado na pilula.
+      counterText_->setMarginLeft(30);
+    }
   }
 
   // A seta que aponta para o botao em foco fica fora dele, no container.
@@ -9388,9 +10278,15 @@ class ScanActivity : public brls::Activity {
           }
         }
       } else if (const auto modern = savew::Load(file)) {
-        // Os saves modernos (spec 082). Sem treinador: o savew le as caixas,
-        // nao o bloco do jogador.
+        // Os saves modernos (spec 082). O `savew` le o nome do treinador desde
+        // a spec 117 (e o que marca o handling trainer num deposito) — a tela
+        // so nao o estava usando, e por isso todo jogo moderno aparecia com
+        // "Nome —" mesmo tendo o dado em maos.
+        //
+        // TID e tempo de jogo continuam vazios: o `savew` nao mapeia o bloco
+        // do jogador desses formatos, e inventar valor e pior que o travessao.
         out.format = savew::GameName(modern->game);
+        out.trainer = modern->trainer_name;
         out.count = modern->Count();
       }
     }
@@ -9897,7 +10793,7 @@ class UserSelectActivity : public brls::Activity {
         SetRow(1, "Tempo de jogo", "—");
         SetRow(2, "Nº de ID", "—");
         SetRow(3, "Pokémon", "0 / " + std::to_string(kNestBoxCapacity));
-        SetRow(4, "Salvo pela última vez em", "—");
+        SetRow(4, "Último save", "—");
         break;
 
       case nestbox::SaveOrigin::kFile: {
@@ -9909,7 +10805,7 @@ class UserSelectActivity : public brls::Activity {
                info.play_time.empty() ? "—" : info.play_time);
         SetRow(2, "Nº de ID", info.trainer_id.empty() ? "—" : info.trainer_id);
         SetRow(3, "Pokémon", std::to_string(info.count));
-        SetRow(4, "Salvo pela última vez em",
+        SetRow(4, "Último save",
                info.saved_at.empty() ? "—" : info.saved_at);
         break;
       }
@@ -9922,7 +10818,7 @@ class UserSelectActivity : public brls::Activity {
         SetRow(2, "Nº de ID", info.trainer_id.empty() ? "—" : info.trainer_id);
         SetRow(3, "Pokémon",
                entry.supported ? std::to_string(info.count) : "não suportado");
-        SetRow(4, "Salvo pela última vez em",
+        SetRow(4, "Último save",
                info.saved_at.empty() ? "—" : info.saved_at);
         break;
       }
@@ -10061,7 +10957,10 @@ class UserSelectActivity : public brls::Activity {
           }
         }
       } else if (const auto modern = savew::Load(file)) {
+        // Mesmo caminho do scanner de fundo: o nome do treinador ja vem do
+        // `savew` (spec 117) e estava sendo descartado aqui tambem.
         info.format = savew::GameName(modern->game);
+        info.trainer = modern->trainer_name;
         info.count = modern->Count();
       }
     }
@@ -10087,6 +10986,1353 @@ class UserSelectActivity : public brls::Activity {
   brls::Label* infoKeys_[kInfoRows] = {};
   brls::Label* infoValues_[kInfoRows] = {};
   brls::Box* infoRows_[kInfoRows] = {};
+};
+
+// --- Gerador de Pokemon (spec 144) -----------------------------------------
+//
+// A tela que cria um Pokemon do zero. O oraculo visual e
+// `docs/telas/mock-gerador-v6.html` — abra os dois lado a lado ao mexer aqui.
+//
+// TODA a regra vive em `source/core/generator.h` (testavel por ctest). Esta
+// Activity so desenha e navega: se uma decisao de negocio aparecer neste
+// arquivo, ela esta no lugar errado.
+//
+// Estrutura, de cima para baixo (medidas do mock, 1280x720):
+//
+//   header 58   icone + titulo + selo de verificacao + relogio
+//   abas   46   L | Especie Origem Stats Golpes | R
+//   corpo       coluna de campos 560px | hero + veredito/detalhe
+//   rodape 52   pilula "Ajuda" + dicas contextuais + botao Criar
+namespace gen = pokehome::generator;
+
+// A tela ja esta pronta e testada (ctest + roteiro `gerador-basico.txt`), mas
+// a spec 144 foi PAUSADA pelo dono antes da conferencia visual dele. Ate que
+// ele volte a ela, o botao nao aparece no menu principal.
+//
+// Escondido, e nao removido, de proposito: apagar o caminho jogaria fora
+// trabalho validado e faria o roteiro de UI parar de exercitar a tela — que e
+// o unico gate automatico que ela tem. Com a flag, o codigo continua vivo e
+// compilado, so nao alcancavel pelo menu.
+//
+// Para reativar de vez: troque o `false` do fallback por `true`.
+//
+// A variavel de ambiente existe para o ROTEIRO DE TESTE continuar abrindo a
+// tela com o botao escondido. Sem ela o gate automatico morreria junto com a
+// pausa, e a spec voltaria do descanso sem cobertura nenhuma — o pior jeito
+// de pausar um trabalho. E o mesmo mecanismo do `NESTBOX_SWITCH_SIM`, que o
+// `run_ui_script.cmake` ja usa para isolar o teste.
+bool GeradorVisivel() {
+  static const bool v = [] {
+    const char* e = std::getenv("NESTBOX_GERADOR");
+    return e != nullptr && e[0] == '1';
+  }();
+  return v;
+}
+
+// Cores do mock que ainda nao existiam na paleta do app.
+const NVGcolor kGenCardHeader = nvgRGB(0x3A, 0xAE, 0xA0);
+const NVGcolor kGenTeal = nvgRGB(0x2F, 0x9E, 0x93);
+const NVGcolor kGenTealDark = nvgRGB(0x1C, 0x6F, 0x68);
+const NVGcolor kGenAmber = nvgRGB(0xF0, 0xA5, 0x1E);
+const NVGcolor kGenAmberDark = nvgRGB(0xC4, 0x7F, 0x06);
+const NVGcolor kGenRed = nvgRGB(0xD9, 0x4F, 0x4A);
+const NVGcolor kGenOk = nvgRGB(0x3E, 0xA3, 0x6B);
+const NVGcolor kGenDim = nvgRGB(0x7B, 0x8D, 0x8C);
+const NVGcolor kGenInk = nvgRGB(0x33, 0x40, 0x3F);
+const NVGcolor kGenFocusBg = nvgRGB(0xFF, 0xF6, 0xE3);
+const NVGcolor kGenErrBg = nvgRGB(0xFD, 0xF0, 0xEF);
+const NVGcolor kGenWarnBg = nvgRGB(0xFD, 0xF7, 0xE8);
+const NVGcolor kGenCell = nvgRGB(0xF5, 0xFA, 0xF8);
+const NVGcolor kGenCellMax = nvgRGB(0xEE, 0xF7, 0xF4);
+const NVGcolor kGenLine = nvgRGB(0xDF, 0xEA, 0xE7);
+
+// Uma linha de formulario: rotulo a esquerda, valor no meio, estado a direita.
+// Desenha os quatro estados do mock (repouso, foco, erro, aviso) e a seta do
+// app no gutter — nunca seta nova em nanovg (regra da spec 047).
+class GenRow : public brls::Box {
+ public:
+  enum class Estado { kNormal, kErro, kAviso };
+  // Como o valor e editado — decide o adorno da linha e a dica do rodape.
+  //
+  // kLista abre um menu de opcoes (o `ShowContextMenu` que o resto do app ja
+  // usa); kMarcar e caixa de marcar, para o que e sim/nao; kMarcarPar sao
+  // duas caixas exclusivas lado a lado (macho/femea), que e como o jogo
+  // apresenta genero — nao como uma lista de um item so.
+  enum class Tipo { kNumero, kLista, kTexto, kMarcar, kMarcarPar };
+
+  GenRow(const std::string& rotulo, Tipo tipo) : tipo_(tipo) {
+    setAxis(brls::Axis::ROW);
+    setHeight(46);
+    setCornerRadius(10);
+    setAlignItems(brls::AlignItems::CENTER);
+    // 30px de gutter a esquerda: e onde a seta de foco e desenhada.
+    setPadding(0, 12, 0, 30);
+
+    rotulo_ = new brls::Label();
+    rotulo_->setText(rotulo);
+    rotulo_->setFontSize(15);
+    rotulo_->setTextColor(kGenDim);
+    rotulo_->setWidth(150);
+    addView(rotulo_);
+
+    valor_ = new brls::Label();
+    valor_->setFontSize(16);
+    valor_->setTextColor(kGenInk);
+    valor_->setGrow(1.0f);
+    // Numero fica centrado entre as setas; o resto alinha a esquerda, para o
+    // texto da opcao comecar sempre no mesmo lugar.
+    valor_->setHorizontalAlign(tipo == Tipo::kNumero
+                                   ? brls::HorizontalAlign::CENTER
+                                   : brls::HorizontalAlign::LEFT);
+    addView(valor_);
+  }
+
+  void setValor(const std::string& v) { valor_->setText(v); }
+  // Caixa de marcar: `a` e a primeira (ou a unica), `b` a segunda do par.
+  void setMarcas(bool a, bool b = false) { marca_a_ = a; marca_b_ = b; }
+  void setEstado(Estado e) { estado_ = e; }
+  void setFoco(bool f) { foco_ = f; }
+  void setAjuste(bool a) { ajuste_ = a; }
+  Tipo tipo() const { return tipo_; }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h,
+            brls::Style style, brls::FrameContext* ctx) override {
+    // Fundo por estado. O foco vence o erro no FUNDO, mas o filete do erro
+    // continua visivel — os dois precisam conviver, como no mock.
+    NVGcolor fundo = nvgRGBA(0, 0, 0, 0);
+    if (foco_) fundo = kGenFocusBg;
+    else if (estado_ == Estado::kErro) fundo = kGenErrBg;
+    else if (estado_ == Estado::kAviso) fundo = kGenWarnBg;
+
+    if (fundo.a > 0.0f) {
+      nvgBeginPath(vg);
+      nvgRoundedRect(vg, x, y, w, h, 10);
+      nvgFillColor(vg, fundo);
+      nvgFill(vg);
+    }
+
+    // Filete de 4px na borda esquerda quando ha problema.
+    if (estado_ != Estado::kNormal) {
+      nvgBeginPath(vg);
+      nvgRoundedRect(vg, x, y, 4, h, 2);
+      nvgFillColor(vg, estado_ == Estado::kErro ? kGenRed : kGenAmber);
+      nvgFill(vg);
+    }
+
+    // Contorno do foco (e o do modo de ajuste, mais escuro).
+    if (foco_) {
+      nvgBeginPath(vg);
+      nvgRoundedRect(vg, x + 1.5f, y + 1.5f, w - 3, h - 3, 9);
+      nvgStrokeColor(vg, ajuste_ ? kGenAmberDark : kGenAmber);
+      nvgStrokeWidth(vg, 3);
+      nvgStroke(vg);
+
+      // A seta do app no gutter. Selector::Draw poe o bico em right_x.
+      Selector::Draw(vg, Selector::Variant::kPrimary, x + 24, y + h / 2, 20,
+                     tick_++, kGenTeal);
+    }
+
+    // Adorno por tipo, no canto direito da linha.
+    const NVGcolor tinta = foco_ ? kGenTealDark : nvgRGB(0xB8, 0xC8, 0xC4);
+    nvgFontSize(vg, 13);
+    nvgFillColor(vg, tinta);
+    if (tipo_ == Tipo::kNumero) {
+      nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+      nvgText(vg, x + 186, y + h / 2, "◄", nullptr);
+      nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+      nvgText(vg, x + w - 14, y + h / 2, "►", nullptr);
+    } else if (tipo_ == Tipo::kLista) {
+      // Chevron para baixo: o sinal universal de "isto abre uma lista".
+      DrawChevron(vg, x + w - 20, y + h / 2, tinta);
+    } else if (tipo_ == Tipo::kTexto) {
+      nvgTextAlign(vg, NVG_ALIGN_RIGHT | NVG_ALIGN_MIDDLE);
+      nvgText(vg, x + w - 14, y + h / 2, "A", nullptr);
+    } else if (tipo_ == Tipo::kMarcar) {
+      DrawCheckbox(vg, x + 190, y + h / 2, marca_a_);
+    } else if (tipo_ == Tipo::kMarcarPar) {
+      // Duas caixas exclusivas, cada uma com o simbolo do sexo ao lado.
+      DrawCheckbox(vg, x + 190, y + h / 2, marca_a_);
+      nvgFontSize(vg, 17);
+      nvgFillColor(vg, marca_a_ ? nvgRGB(0x3A, 0x7A, 0xD9) : kGenDim);
+      nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+      nvgText(vg, x + 212, y + h / 2, "♂", nullptr);
+
+      DrawCheckbox(vg, x + 290, y + h / 2, marca_b_);
+      nvgFillColor(vg, marca_b_ ? nvgRGB(0xD9, 0x53, 0x8C) : kGenDim);
+      nvgText(vg, x + 312, y + h / 2, "♀", nullptr);
+    }
+
+    // Bolinha "!" encostada a direita quando ha problema.
+    if (estado_ != Estado::kNormal) {
+      const float cx = x + w - 26, cy = y + h / 2;
+      nvgBeginPath(vg);
+      nvgCircle(vg, cx, cy, 10.5f);
+      nvgFillColor(vg, estado_ == Estado::kErro ? kGenRed : kGenAmber);
+      nvgFill(vg);
+      nvgFontSize(vg, 13);
+      nvgFillColor(vg, kWhite);
+      nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE);
+      nvgText(vg, cx, cy, "!", nullptr);
+    }
+
+    Box::draw(vg, x, y, w, h, style, ctx);
+  }
+
+ private:
+  // Caixa de marcar 18x18: vazia com borda, ou teal com o tique branco.
+  static void DrawCheckbox(NVGcontext* vg, float cx, float cy, bool marcado) {
+    const float r = 9.0f;
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, cx - r, cy - r, r * 2, r * 2, 5);
+    if (marcado) {
+      nvgFillColor(vg, kGenTeal);
+      nvgFill(vg);
+    } else {
+      nvgFillColor(vg, kWhite);
+      nvgFill(vg);
+      nvgStrokeColor(vg, kGenLine);
+      nvgStrokeWidth(vg, 2);
+      nvgStroke(vg);
+    }
+    if (!marcado) return;
+    // O tique, em duas linhas — traco, nao fonte: nao depende de glifo.
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, cx - 4.5f, cy);
+    nvgLineTo(vg, cx - 1.0f, cy + 3.5f);
+    nvgLineTo(vg, cx + 4.5f, cy - 3.5f);
+    nvgStrokeColor(vg, kWhite);
+    nvgStrokeWidth(vg, 2.4f);
+    nvgLineCap(vg, NVG_ROUND);
+    nvgLineJoin(vg, NVG_ROUND);
+    nvgStroke(vg);
+  }
+
+  // Chevron para baixo — o sinal de "abre uma lista".
+  static void DrawChevron(NVGcontext* vg, float cx, float cy, NVGcolor cor) {
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, cx - 5.5f, cy - 2.5f);
+    nvgLineTo(vg, cx, cy + 3.0f);
+    nvgLineTo(vg, cx + 5.5f, cy - 2.5f);
+    nvgStrokeColor(vg, cor);
+    nvgStrokeWidth(vg, 2.2f);
+    nvgLineCap(vg, NVG_ROUND);
+    nvgLineJoin(vg, NVG_ROUND);
+    nvgStroke(vg);
+  }
+
+  brls::Label* rotulo_ = nullptr;
+  brls::Label* valor_ = nullptr;
+  Tipo tipo_;
+  Estado estado_ = Estado::kNormal;
+  bool foco_ = false;
+  bool ajuste_ = false;
+  bool marca_a_ = false;
+  bool marca_b_ = false;
+  unsigned tick_ = 0;
+};
+
+// O cartao branco de conteudo (formulario, hero, veredito). Sombra suave e
+// cabecalho teal, como todo cartao do app.
+class GenCard : public brls::Box {
+ public:
+  explicit GenCard(const std::string& titulo) {
+    setAxis(brls::Axis::COLUMN);
+    setCornerRadius(14);
+    setBackgroundColor(kWhite);
+
+    auto* head = new brls::Box(brls::Axis::ROW);
+    head->setHeight(34);
+    head->setAlignItems(brls::AlignItems::CENTER);
+    head->setPadding(0, 16, 0, 16);
+    head->setBackgroundColor(kGenCardHeader);
+    titulo_ = new brls::Label();
+    titulo_->setText(titulo);
+    titulo_->setFontSize(15);
+    titulo_->setTextColor(kWhite);
+    titulo_->setGrow(1.0f);
+    head->addView(titulo_);
+    direita_ = new brls::Label();
+    direita_->setFontSize(13);
+    direita_->setTextColor(nvgRGBA(0xFF, 0xFF, 0xFF, 0xEB));
+    head->addView(direita_);
+    addView(head);
+
+    corpo_ = new brls::Box(brls::Axis::COLUMN);
+    corpo_->setGrow(1.0f);
+    corpo_->setPadding(8, 14, 8, 14);
+    addView(corpo_);
+  }
+
+  brls::Box* corpo() { return corpo_; }
+  void setTitulo(const std::string& t) { titulo_->setText(t); }
+  void setDireita(const std::string& t) { direita_->setText(t); }
+
+  void draw(NVGcontext* vg, float x, float y, float w, float h,
+            brls::Style style, brls::FrameContext* ctx) override {
+    DrawSoftShadow(vg, x, y, w, h, 14);
+    Box::draw(vg, x, y, w, h, style, ctx);
+  }
+
+ private:
+  brls::Label* titulo_ = nullptr;
+  brls::Label* direita_ = nullptr;
+  brls::Box* corpo_ = nullptr;
+};
+
+// Tela do gerador. Toda a regra vem de `pokehome::generator`; aqui so ha
+// desenho e navegacao.
+class GeneratorActivity : public brls::Activity {
+ public:
+  LogScreen log_screen_{"GeneratorActivity"};
+
+  explicit GeneratorActivity(NestBoxSource* nest) : nest_(nest) {
+    // Estado inicial coerente: um Pikachu de nivel 5 com o golpe que ele
+    // aprende. Comecar com o formulario invalido faria o selo nascer vermelho
+    // sem o jogador ter feito nada.
+    estado_.dex = 25;
+    estado_.jogo = pokehome::personal::Jogo::kSV;
+    // O nivel nasce igual ao do encontro do molde: e o unico par (local,
+    // nivel) que sabemos ser aceito. Comecar em 5 com um molde de encontro
+    // nivel 10 fazia a tela abrir ja avisando — culpar o jogador por uma
+    // escolha que foi nossa.
+    const std::uint8_t enc = gen::MetLevelDoMolde(estado_.jogo);
+    estado_.level = enc ? enc : 5;
+    estado_.met_level = estado_.level;
+    gen::ApplyFix(estado_, "sem_golpe");
+
+#ifndef __SWITCH__
+    // Controle remoto (specs 133/134): publica o que a tela mostra, para o
+    // roteiro afirmar o estado sem ninguem olhar a janela.
+    nestbox::script::SetStateProvider("GeneratorActivity", [this] {
+      const auto probs = gen::Verify(estado_);
+      int erros = 0, avisos = 0;
+      for (const auto& p : probs)
+        (p.severity == gen::Severity::kErro ? erros : avisos)++;
+      std::string out = "\"aba\":" + std::to_string(static_cast<int>(aba_));
+      out += ",\"campo\":" + std::to_string(campo_);
+      out += ",\"dex\":" + std::to_string(estado_.dex);
+      out += ",\"nivel\":" + std::to_string(estado_.level);
+      out += ",\"shiny\":" + std::string(estado_.shiny ? "true" : "false");
+      out += ",\"erros\":" + std::to_string(erros);
+      out += ",\"avisos\":" + std::to_string(avisos);
+      out += ",\"veredito\":\"" +
+             std::string(erros ? "ilegal" : (avisos ? "ressalvas" : "legal")) +
+             "\"";
+      if (const std::string r = ScriptRect("btn_criar", criarBtn_); !r.empty())
+        out += "," + r;
+      return out;
+    });
+#endif
+  }
+
+  ~GeneratorActivity() override {
+#ifndef __SWITCH__
+    nestbox::script::ClearStateProvider("GeneratorActivity");
+#endif
+  }
+
+  brls::View* createContentView() override {
+    auto* root = new GradientBackground();
+    root->setHeaderBand(58);
+    root->setAxis(brls::Axis::COLUMN);
+
+    root->addView(MakeTopBar());
+    root->addView(MakeTabs());
+
+    auto* body = new brls::Box(brls::Axis::ROW);
+    body->setGrow(1.0f);
+    body->setPadding(10, 18, 0, 18);
+
+    form_ = new GenCard("Especie");
+    form_->setWidth(560);
+    form_->setShrink(0.0f);
+    form_->setMarginRight(14);
+    body->addView(form_);
+
+    auto* col = new brls::Box(brls::Axis::COLUMN);
+    col->setGrow(1.0f);
+    hero_ = new GenCard("");
+    hero_->setHeight(210);
+    hero_->setMarginBottom(12);
+    col->addView(hero_);
+    detalhe_ = new GenCard("");
+    detalhe_->setGrow(1.0f);
+    col->addView(detalhe_);
+    body->addView(col);
+    root->addView(body);
+
+    root->addView(MakeFooter());
+
+    ConstruirCampos();
+    Atualizar();
+
+    // O formulario e quem recebe o foco do borealis. Sem UMA view focavel, o
+    // d-pad nao chega nas acoes registradas no root — o motor so entrega
+    // input a partir da view em foco. O cursor DENTRO do formulario e nosso
+    // (`campo_`), entao ha uma unica view focavel, nao uma por linha.
+    form_->setFocusable(true);
+    form_->setHideHighlight(true);  // o realce e a linha pintada, nao o contorno
+
+    // As acoes ficam no FORMULARIO, nao no root: o borealis entrega input a
+    // partir da view em foco, e uma acao registrada num ancestral que nunca
+    // recebe foco simplesmente nao dispara.
+    //
+    // O ultimo argumento e `hidden`: false publica a dica na barra do
+    // borealis, true a esconde. Aqui tudo fica escondido porque a tela desenha
+    // a PROPRIA barra de dicas, contextual (PintarRodape).
+    form_->registerAction(
+        "Selecionar", brls::BUTTON_A, [this](brls::View*) {
+          AtivarCampo();
+          return true;
+        }, true);
+    form_->registerAction(
+        "Verificacao", brls::BUTTON_Y, [this](brls::View*) {
+          AbrirVerificacao();
+          return true;
+        }, false);
+    form_->registerAction(
+        "Corrigir", brls::BUTTON_X, [this](brls::View*) {
+          CorrigirCampoFocado();
+          return true;
+        }, false);
+    form_->registerAction(
+        "Aba anterior", brls::BUTTON_LB, [this](brls::View*) {
+          TrocarAba(-1);
+          return true;
+        }, false);
+    form_->registerAction(
+        "Proxima aba", brls::BUTTON_RB, [this](brls::View*) {
+          TrocarAba(+1);
+          return true;
+        }, false);
+    form_->registerAction(
+        "Criar", brls::BUTTON_START, [this](brls::View*) {
+          TentarCriar();
+          return true;
+        }, false);
+    // Navegacao entre campos.
+    form_->registerAction(
+        "Cima", brls::BUTTON_UP, [this](brls::View*) {
+          MoverCampo(-1);
+          return true;
+        }, true);
+    form_->registerAction(
+        "Baixo", brls::BUTTON_DOWN, [this](brls::View*) {
+          MoverCampo(+1);
+          return true;
+        }, true);
+    form_->registerAction(
+        "Diminuir", brls::BUTTON_LEFT, [this](brls::View*) {
+          AjustarCampo(-1);
+          return true;
+        }, true);
+    form_->registerAction(
+        "Aumentar", brls::BUTTON_RIGHT, [this](brls::View*) {
+          AjustarCampo(+1);
+          return true;
+        }, true);
+
+    brls::Application::giveFocus(form_);
+    return root;
+  }
+
+ private:
+  // --- Construcao da tela --------------------------------------------------
+
+  brls::Box* MakeTopBar() {
+    auto* bar = new brls::Box(brls::Axis::ROW);
+    bar->setHeight(58);
+    bar->setAlignItems(brls::AlignItems::CENTER);
+    bar->setPadding(0, 24, 0, 24);
+
+    auto* icon = new brls::Box();
+    icon->setWidth(34);
+    icon->setHeight(34);
+    icon->setCornerRadius(9);
+    icon->setBackgroundColor(kGenAmber);
+    icon->setMarginRight(14);
+    bar->addView(icon);
+
+    auto* t = new brls::Label();
+    t->setText("GERADOR DE POKÉMON");
+    t->setFontSize(23);
+    t->setTextColor(kTextPrimary);
+    bar->addView(t);
+
+    auto* sp = new brls::Box();
+    sp->setGrow(1.0f);
+    bar->addView(sp);
+
+    selo_ = new brls::Label();
+    selo_->setFontSize(14);
+    selo_->setTextColor(kWhite);
+    seloBox_ = new brls::Box(brls::Axis::ROW);
+    seloBox_->setHeight(32);
+    seloBox_->setCornerRadius(16);
+    seloBox_->setPadding(0, 16, 0, 16);
+    seloBox_->setAlignItems(brls::AlignItems::CENTER);
+    seloBox_->setMarginRight(18);
+    seloBox_->addView(selo_);
+    bar->addView(seloBox_);
+
+    auto* clock = new brls::Label();
+    clock->setText(CurrentTimeText());
+    clock->setFontSize(19);
+    clock->setTextColor(kTextSecondary);
+    bar->addView(clock);
+    return bar;
+  }
+
+  brls::Box* MakeTabs() {
+    auto* row = new brls::Box(brls::Axis::ROW);
+    row->setHeight(46);
+    row->setAlignItems(brls::AlignItems::CENTER);
+    row->setJustifyContent(brls::JustifyContent::CENTER);
+
+    auto bump = [](const char* txt) {
+      auto* b = new brls::Label();
+      b->setText(txt);
+      b->setFontSize(12);
+      b->setTextColor(kTextSecondary);
+      b->setMargins(0, 10, 0, 10);
+      return b;
+    };
+    row->addView(bump("L"));
+
+    static const char* kNomes[] = {"Espécie", "Origem", "Stats", "Golpes"};
+    for (int i = 0; i < 4; ++i) {
+      auto* t = new brls::Box(brls::Axis::ROW);
+      t->setHeight(32);
+      t->setCornerRadius(16);
+      t->setPadding(0, 22, 0, 22);
+      t->setAlignItems(brls::AlignItems::CENTER);
+      t->setMarginRight(10);
+      auto* l = new brls::Label();
+      l->setText(kNomes[i]);
+      l->setFontSize(16);
+      t->addView(l);
+      abaBox_[i] = t;
+      abaLabel_[i] = l;
+      row->addView(t);
+    }
+    row->addView(bump("R"));
+    return row;
+  }
+
+  brls::Box* MakeFooter() {
+    auto* bar = new brls::Box(brls::Axis::ROW);
+    bar->setHeight(52);
+    bar->setAlignItems(brls::AlignItems::CENTER);
+
+    // Pilula branca "Ajuda" colada na esquerda — como nas outras telas.
+    auto* ajuda = new brls::Box(brls::Axis::ROW);
+    ajuda->setHeight(52);
+    ajuda->setPadding(0, 22, 0, 18);
+    ajuda->setAlignItems(brls::AlignItems::CENTER);
+    ajuda->setBackgroundColor(kWhite);
+    ajuda->setCornerRadius(14);
+    auto* al = new brls::Label();
+    al->setText("  Ajuda");
+    al->setFontSize(15);
+    al->setTextColor(nvgRGB(0x1D, 0x1D, 0x1B));
+    ajuda->addView(al);
+    bar->addView(ajuda);
+
+    dicas_ = new brls::Label();
+    dicas_->setFontSize(15);
+    dicas_->setTextColor(nvgRGB(0x3C, 0x4A, 0x48));
+    dicas_->setMarginLeft(20);
+    dicas_->setGrow(1.0f);
+    bar->addView(dicas_);
+
+    criarBtn_ = new brls::Box(brls::Axis::ROW);
+    criarBtn_->setHeight(38);
+    criarBtn_->setCornerRadius(19);
+    criarBtn_->setPadding(0, 26, 0, 26);
+    criarBtn_->setAlignItems(brls::AlignItems::CENTER);
+    criarBtn_->setMarginRight(18);
+    criarLabel_ = new brls::Label();
+    criarLabel_->setFontSize(16);
+    criarLabel_->setTextColor(kWhite);
+    criarBtn_->addView(criarLabel_);
+    bar->addView(criarBtn_);
+    return bar;
+  }
+
+  static std::string CurrentTimeText() {
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    if (localtime_s(&tm, &now) != 0) return "";
+#else
+    if (!localtime_r(&now, &tm)) return "";
+#endif
+    char buf[8];
+    if (std::strftime(buf, sizeof(buf), "%H:%M", &tm) == 0) return "";
+    return buf;
+  }
+
+  // --- Campos por aba ------------------------------------------------------
+
+  void ConstruirCampos() {
+    linhas_.clear();
+    form_->corpo()->clearViews();
+
+    auto add = [this](const std::string& rotulo, GenRow::Tipo tipo) {
+      auto* r = new GenRow(rotulo, tipo);
+      form_->corpo()->addView(r);
+      linhas_.push_back(r);
+      return r;
+    };
+
+    switch (aba_) {
+      case gen::Section::kEspecie:
+        form_->setTitulo("Espécie");
+        add("Pokémon", GenRow::Tipo::kLista);
+        add("Nível", GenRow::Tipo::kNumero);
+        add("Shiny", GenRow::Tipo::kMarcar);
+        add("Gênero", GenRow::Tipo::kMarcarPar);
+        add("Natureza", GenRow::Tipo::kLista);
+        add("Habilidade", GenRow::Tipo::kLista);
+        add("Pokébola", GenRow::Tipo::kLista);
+        break;
+      case gen::Section::kOrigem:
+        form_->setTitulo("Origem — onde foi encontrado");
+        add("Jogo", GenRow::Tipo::kLista);
+        add("Nv. encontro", GenRow::Tipo::kNumero);
+        add("OT", GenRow::Tipo::kTexto);
+        add("ID", GenRow::Tipo::kNumero);
+        add("SID", GenRow::Tipo::kNumero);
+        break;
+      case gen::Section::kStats:
+        form_->setTitulo("Stats — IVs e EVs");
+        for (int i = 0; i < 6; ++i)
+          add(kStatNomes[i], GenRow::Tipo::kNumero);
+        break;
+      case gen::Section::kGolpes:
+        form_->setTitulo("Golpes");
+        for (int i = 0; i < 4; ++i)
+          add("Golpe " + std::to_string(i + 1), GenRow::Tipo::kLista);
+        break;
+    }
+    if (campo_ >= static_cast<int>(linhas_.size())) campo_ = 0;
+  }
+
+  // --- Atualizacao ---------------------------------------------------------
+
+  void Atualizar() {
+    const auto probs = gen::Verify(estado_);
+    int erros = 0, avisos = 0;
+    for (const auto& p : probs)
+      (p.severity == gen::Severity::kErro ? erros : avisos)++;
+
+    PintarAbas(probs);
+    PintarCampos(probs);
+    PintarSelo(erros, avisos);
+    PintarHero();
+    PintarDetalhe(probs);
+    PintarRodape(erros);
+  }
+
+  void PintarAbas(const std::vector<gen::Issue>& probs) {
+    for (int i = 0; i < 4; ++i) {
+      const bool ativa = static_cast<int>(aba_) == i;
+      abaBox_[i]->setBackgroundColor(
+          ativa ? kWhite : nvgRGBA(0xFF, 0xFF, 0xFF, 0x8C));
+      abaLabel_[i]->setTextColor(ativa ? kGenTealDark : kTextSecondary);
+      abaLabel_[i]->setFontSize(16);
+      (void)probs;
+    }
+  }
+
+  void PintarCampos(const std::vector<gen::Issue>& probs) {
+    for (std::size_t i = 0; i < linhas_.size(); ++i) {
+      linhas_[i]->setValor(ValorDoCampo(static_cast<int>(i)));
+      if (aba_ == gen::Section::kEspecie) {
+        if (i == 2) linhas_[i]->setMarcas(estado_.shiny);
+        if (i == 3) linhas_[i]->setMarcas(estado_.gender == 0, estado_.gender == 1);
+      }
+      linhas_[i]->setFoco(static_cast<int>(i) == campo_);
+      linhas_[i]->setAjuste(ajuste_ && static_cast<int>(i) == campo_);
+
+      GenRow::Estado e = GenRow::Estado::kNormal;
+      for (const auto& p : probs) {
+        if (p.section != aba_) continue;
+        if (!ProblemaDoCampo(p, static_cast<int>(i))) continue;
+        e = p.severity == gen::Severity::kErro ? GenRow::Estado::kErro
+                                               : GenRow::Estado::kAviso;
+        if (e == GenRow::Estado::kErro) break;
+      }
+      linhas_[i]->setEstado(e);
+    }
+  }
+
+  void PintarSelo(int erros, int avisos) {
+    if (erros > 0) {
+      seloBox_->setBackgroundColor(kGenRed);
+      selo_->setText("  " + std::to_string(erros) +
+                     (erros > 1 ? " problemas" : " problema"));
+    } else if (avisos > 0) {
+      seloBox_->setBackgroundColor(kGenAmber);
+      selo_->setText("  " + std::to_string(avisos) +
+                     (avisos > 1 ? " avisos" : " aviso"));
+    } else {
+      seloBox_->setBackgroundColor(kGenOk);
+      selo_->setText("  tudo certo");
+    }
+  }
+
+  void PintarHero() {
+    hero_->setTitulo("Nº " + Pad4(estado_.dex));
+    hero_->setDireita(estado_.shiny ? "✦ SHINY" : "");
+    hero_->corpo()->clearViews();
+
+    auto* row = new brls::Box(brls::Axis::ROW);
+    row->setAlignItems(brls::AlignItems::CENTER);
+
+    auto* img = new brls::Image();
+    img->setImageFromFile(SpritePathFor(estado_.dex, estado_.shiny, true));
+    img->setWidth(150);
+    img->setHeight(150);
+    img->setMarginRight(12);
+    row->addView(img);
+
+    auto* col = new brls::Box(brls::Axis::COLUMN);
+    col->setGrow(1.0f);
+    auto* nome = new brls::Label();
+    nome->setText(NomeEspecie() + "   Lv. " + std::to_string(estado_.level));
+    nome->setFontSize(22);
+    nome->setTextColor(kGenInk);
+    col->addView(nome);
+
+    auto* sub = new brls::Label();
+    sub->setText(NomeJogo(estado_.jogo));
+    sub->setFontSize(13);
+    sub->setTextColor(kGenDim);
+    sub->setMarginTop(3);
+    col->addView(sub);
+
+    // As 6 barras de stat, com a formula real.
+    const auto* pe = gen::PersonalOf(estado_);
+    for (int i = 0; i < 6; ++i) {
+      auto* b = new brls::Box(brls::Axis::ROW);
+      b->setHeight(17);
+      b->setAlignItems(brls::AlignItems::CENTER);
+      auto* rot = new brls::Label();
+      rot->setText(kStatCurto[i]);
+      rot->setFontSize(13);
+      rot->setTextColor(kGenDim);
+      rot->setWidth(36);
+      b->addView(rot);
+      auto* val = new brls::Label();
+      val->setText(pe ? std::to_string(StatCalculado(*pe, i)) : "—");
+      val->setFontSize(13);
+      val->setTextColor(kGenInk);
+      b->addView(val);
+      col->addView(b);
+    }
+    row->addView(col);
+    hero_->corpo()->addView(row);
+  }
+
+  void PintarDetalhe(const std::vector<gen::Issue>& probs) {
+    int erros = 0, avisos = 0;
+    for (const auto& p : probs)
+      (p.severity == gen::Severity::kErro ? erros : avisos)++;
+
+    detalhe_->setTitulo(erros ? "ILEGAL — não seria aceito"
+                              : (avisos ? "LEGAL com ressalvas"
+                                        : "LEGAL — coerente com a origem"));
+    detalhe_->setDireita(std::to_string(erros) + " erros · " +
+                         std::to_string(avisos) + " avisos");
+    detalhe_->corpo()->clearViews();
+
+    // O painel mostra o problema do campo FOCADO — e o popover do mock, agora
+    // fixo (nao ha cursor de mouse no console).
+    const gen::Issue* foco = nullptr;
+    for (const auto& p : probs) {
+      if (p.section == aba_ && ProblemaDoCampo(p, campo_)) {
+        foco = &p;
+        if (p.severity == gen::Severity::kErro) break;
+      }
+    }
+
+    auto* txt = new brls::Label();
+    txt->setFontSize(14);
+    if (foco) {
+      txt->setText(foco->reason +
+                   (foco->fix_label.empty()
+                        ? "\n\nApenas aviso — pode manter."
+                        : "\n\n[X] " + foco->fix_label));
+      txt->setTextColor(kGenInk);
+    } else {
+      txt->setText(
+          "Navegue com o d-pad; o campo com ! explica o problema aqui.\n\n"
+          "◄► troca o valor · A abre lista/teclado · X aplica a correção · "
+          "Y abre a verificação completa.");
+      txt->setTextColor(kGenDim);
+    }
+    detalhe_->corpo()->addView(txt);
+  }
+
+  void PintarRodape(int erros) {
+    // A barra e CONTEXTUAL: mostra so o que o foco atual aceita (decisao do
+    // dono ao revisar o mock v6 — dica fixa que mente metade do tempo e pior
+    // que dica nenhuma).
+    std::string d = " Voltar";
+    if (campo_ >= 0 && campo_ < static_cast<int>(linhas_.size())) {
+      switch (linhas_[campo_]->tipo()) {
+        case GenRow::Tipo::kNumero: d += "   ◄► Ajustar"; break;
+        case GenRow::Tipo::kLista: d += "   A Escolher"; break;
+        case GenRow::Tipo::kTexto: d += "   A Teclado"; break;
+        case GenRow::Tipo::kMarcar: d += "   A Marcar"; break;
+        case GenRow::Tipo::kMarcarPar: d += "   A/◄► Trocar"; break;
+      }
+    }
+    if (!CorrecaoDoCampoFocado().empty()) d += "    Corrigir";
+    d += "    Verificação";
+    dicas_->setText(d);
+
+    criarBtn_->setBackgroundColor(erros ? kGenRed : kGenAmber);
+    criarLabel_->setText(erros ? "＋ Criar… (tem erro)" : "＋ Criar na caixa");
+  }
+
+  // --- Leitura do estado ---------------------------------------------------
+
+  static std::string Pad4(int n) {
+    std::string s = std::to_string(n);
+    while (s.size() < 4) s = "0" + s;
+    return s;
+  }
+
+  std::string NomeEspecie() const {
+    const int dex = estado_.dex;
+    // za::ZaSpeciesName cobre a dex nacional inteira e ja e usada na UI
+    // (linha ~1200); nao vale incluir outra tabela de nomes so para isto.
+    std::string n = za::ZaSpeciesName(static_cast<std::uint16_t>(dex));
+    if (!n.empty() && n != "?") return n;
+    return "#" + std::to_string(dex);
+  }
+
+  static const char* NomeJogo(pokehome::personal::Jogo j) {
+    using J = pokehome::personal::Jogo;
+    switch (j) {
+      case J::kRubySapphire: return "Ruby / Sapphire";
+      case J::kEmerald: return "Emerald";
+      case J::kFireRed: return "FireRed";
+      case J::kLeafGreen: return "LeafGreen";
+      case J::kLgpe: return "Let's Go";
+      case J::kSwSh: return "Sword / Shield";
+      case J::kBdsp: return "Brilliant Diamond / Shining Pearl";
+      case J::kLa: return "Legends: Arceus";
+      case J::kSV: return "Scarlet / Violet";
+      case J::kZA: return "Legends Z-A";
+      default: return "?";
+    }
+  }
+
+  std::uint16_t StatCalculado(const pokehome::personal::EntryFull& pe,
+                              int i) const {
+    const int base = pe.base[i], iv = estado_.ivs[i], ev = estado_.evs[i];
+    const int L = estado_.level;
+    if (i == 0) return static_cast<std::uint16_t>((2 * base + iv + ev / 4) * L / 100 + L + 10);
+    return static_cast<std::uint16_t>((2 * base + iv + ev / 4) * L / 100 + 5);
+  }
+
+  std::string ValorDoCampo(int i) const {
+    using J = pokehome::personal::Jogo;
+    switch (aba_) {
+      case gen::Section::kEspecie:
+        switch (i) {
+          case 0: return Pad4(estado_.dex) + " — " + NomeEspecie();
+          case 1: return "Lv. " + std::to_string(estado_.level);
+          case 2: return estado_.shiny ? "Sim ✦" : "Não";
+          case 3: return estado_.gender == 0 ? "♂ Macho"
+                       : estado_.gender == 1 ? "♀ Fêmea" : "— Sem gênero";
+          case 4: return g3::NatureName(estado_.nature);
+          case 5: {
+            const auto* pe = gen::PersonalOf(estado_);
+            if (!pe) return "—";
+            const std::uint16_t a = estado_.ability_slot == 1 ? pe->ability1
+                                  : estado_.ability_slot == 2 ? pe->ability2
+                                                              : pe->ability_hidden;
+            std::string nome = a < pokehome::modern::kAbilityCount
+                                   ? pokehome::modern::kAbilityNames[a]
+                                   : "?";
+            if (estado_.ability_slot == 4) nome += " (oculta)";
+            return nome;
+          }
+          case 6: return NomeBola(estado_.ball);
+        }
+        break;
+      case gen::Section::kOrigem:
+        switch (i) {
+          case 0: return NomeJogo(estado_.jogo);
+          case 1: return std::to_string(estado_.met_level);
+          case 2: return estado_.ot_name;
+          case 3: return std::to_string(estado_.tid);
+          case 4: return std::to_string(estado_.sid);
+        }
+        break;
+      case gen::Section::kStats:
+        if (i >= 0 && i < 6)
+          return "IV " + std::to_string(estado_.ivs[i]) + "   ·   EV " +
+                 std::to_string(estado_.evs[i]);
+        break;
+      case gen::Section::kGolpes:
+        if (i >= 0 && i < 4) {
+          const std::uint16_t m = estado_.moves[i];
+          if (m == 0) return "— vazio —";
+          return m < pokehome::modern::kMoveNameCount
+                     ? pokehome::modern::kMoveNames[m]
+                     : std::to_string(m);
+        }
+        break;
+    }
+    return "";
+  }
+
+  static std::string NomeBola(std::uint8_t b) {
+    // Os nomes das bolas vivem na tabela de itens; a bola N e o item N+1 na
+    // numeracao do gen3 em diante (Master=1 -> item 1).
+    static const char* kBolas[] = {"—", "Master Ball", "Ultra Ball",
+                                   "Great Ball", "Poké Ball", "Safari Ball",
+                                   "Net Ball", "Dive Ball", "Nest Ball",
+                                   "Repeat Ball", "Timer Ball", "Luxury Ball",
+                                   "Premier Ball", "Dusk Ball", "Heal Ball",
+                                   "Quick Ball", "Cherish Ball"};
+    if (b < sizeof(kBolas) / sizeof(kBolas[0])) return kBolas[b];
+    if (b == 33) return "Beast Ball";
+    return "Bola " + std::to_string(b);
+  }
+
+  // Um problema pertence ao campo `i` da aba atual? A associacao e por code,
+  // porque o `Issue` carrega a secao mas nao o indice da linha.
+  bool ProblemaDoCampo(const gen::Issue& p, int i) const {
+    if (p.section != aba_) return false;
+    switch (aba_) {
+      case gen::Section::kEspecie:
+        if (i == 0) return p.code == "especie_fora_do_jogo";
+        if (i == 3) return p.code == "genero_impossivel";
+        if (i == 5) return p.code == "habilidade_invalida";
+        if (i == 6) return p.code == "bola_anacronica";
+        return false;
+      case gen::Section::kOrigem:
+        if (i == 1)
+          return p.code == "met_level_alto" ||
+                 p.code == "met_level_fora_do_encontro";
+        return false;
+      case gen::Section::kGolpes:
+        return p.code == "golpe_" + std::to_string(i) ||
+               p.code == "golpe_duplicado_" + std::to_string(i) ||
+               p.code == "sem_golpe";
+      default:
+        return false;
+    }
+  }
+
+  std::string CorrecaoDoCampoFocado() const {
+    for (const auto& p : gen::Verify(estado_)) {
+      if (ProblemaDoCampo(p, campo_) && !p.fix_label.empty()) return p.code;
+    }
+    return "";
+  }
+
+  // --- Navegacao -----------------------------------------------------------
+
+  void TrocarAba(int d) {
+    aba_ = static_cast<gen::Section>(
+        ((static_cast<int>(aba_) + d) % 4 + 4) % 4);
+    campo_ = 0;
+    ajuste_ = false;
+    ConstruirCampos();
+    Atualizar();
+  }
+
+  void MoverCampo(int d) {
+    if (linhas_.empty()) return;
+    const int n = static_cast<int>(linhas_.size());
+    campo_ = std::clamp(campo_ + d, 0, n - 1);
+    ajuste_ = false;
+    Atualizar();
+  }
+
+  void AjustarCampo(int d) {
+    using J = pokehome::personal::Jogo;
+    switch (aba_) {
+      case gen::Section::kEspecie:
+        switch (campo_) {
+          case 1: estado_.level = static_cast<std::uint8_t>(
+                      std::clamp(estado_.level + d, 1, 100)); break;
+          // Shiny e uma caixa so: quem alterna e o A. Genero sao DUAS
+          // caixas exclusivas, entao ◄► anda entre elas — o gesto natural
+          // quando ha duas opcoes lado a lado.
+          case 3: {
+            const auto* pe = gen::PersonalOf(estado_);
+            if (pe && pe->gender == 255) break;  // sem genero: nada a mover
+            estado_.gender = estado_.gender == 0 ? 1 : 0;
+            break;
+          }
+          // Natureza, habilidade e bola viraram lista (A abre). Nao respondem
+          // mais a ◄►: dois jeitos de mexer no mesmo campo confundem, e a
+          // lista mostra o que existe em vez de fazer o jogador adivinhar.
+          default: break;
+        }
+        break;
+      case gen::Section::kOrigem:
+        switch (campo_) {
+          case 0: {
+            const int n = static_cast<int>(J::kCount);
+            estado_.jogo = static_cast<J>(
+                ((static_cast<int>(estado_.jogo) + d) % n + n) % n);
+            break;
+          }
+          case 1: estado_.met_level = static_cast<std::uint8_t>(
+                      std::clamp(estado_.met_level + d, 1, 100)); break;
+          case 3: estado_.tid = static_cast<std::uint16_t>(
+                      std::clamp(estado_.tid + d * 1, 0, 65535)); break;
+          case 4: estado_.sid = static_cast<std::uint16_t>(
+                      std::clamp(estado_.sid + d * 1, 0, 65535)); break;
+          default: break;
+        }
+        break;
+      case gen::Section::kStats:
+        // Uma linha por stat, com IV e EV juntos: ◄► mexe no EV (o campo que
+        // o jogador ajusta mais), e o modo de ajuste (A) alterna para o IV.
+        if (campo_ >= 0 && campo_ < 6) {
+          if (ajuste_)
+            gen::SetIv(estado_, campo_, estado_.ivs[campo_] + d);
+          else
+            gen::SetEv(estado_, campo_, estado_.evs[campo_] + d * 4);
+        }
+        break;
+      case gen::Section::kGolpes:
+        break;
+    }
+    Atualizar();
+  }
+
+  // A no campo focado: caixa de marcar alterna; lista abre o menu de opcoes.
+  //
+  // O menu e o `ShowContextMenu` que o resto do app ja usa — navegavel por
+  // d-pad, translucido e ancorado. Escrever um dropdown proprio daria uma
+  // segunda lista que quase combina com a do menu de contexto.
+  void AtivarCampo() {
+    if (campo_ < 0 || campo_ >= static_cast<int>(linhas_.size())) return;
+    const brls::Rect ancora = linhas_[campo_]->getFrame();
+
+    switch (aba_) {
+      case gen::Section::kEspecie:
+        switch (campo_) {
+          case 0: AbrirListaEspecie(ancora); return;
+          case 2:  // Shiny: caixa de marcar
+            estado_.shiny = !estado_.shiny;
+            Atualizar();
+            return;
+          case 3: {  // Genero: o par de caixas. A alterna entre elas.
+            const auto* pe = gen::PersonalOf(estado_);
+            if (pe && pe->gender == 255) {  // sem genero: nao ha o que marcar
+              Atualizar();
+              return;
+            }
+            estado_.gender = estado_.gender == 0 ? 1 : 0;
+            Atualizar();
+            return;
+          }
+          case 4: AbrirListaNatureza(ancora); return;
+          case 5: AbrirListaHabilidade(ancora); return;
+          case 6: AbrirListaBola(ancora); return;
+          default: return;
+        }
+      case gen::Section::kOrigem:
+        if (campo_ == 0) AbrirListaJogo(ancora);
+        return;
+      case gen::Section::kGolpes:
+        AbrirListaGolpe(ancora, campo_);
+        return;
+      default:
+        return;
+    }
+  }
+
+  void AbrirListaEspecie(brls::Rect ancora) {
+    // Um menu com 1025 linhas seria inutil no d-pad. Ate haver busca, a lista
+    // traz as especies que EXISTEM no jogo escolhido, em ordem de dex, a
+    // partir da atual — o jogador chega perto com R e refina aqui.
+    std::vector<std::pair<std::string, std::function<void()>>> itens;
+    int achados = 0;
+    for (std::uint16_t d = estado_.dex; d <= 1025 && achados < 12; ++d) {
+      if (!pokehome::personal::HasSpecies(estado_.jogo, d)) continue;
+      const std::string nome = za::ZaSpeciesName(d);
+      itens.push_back({Pad4(d) + " — " + (nome.empty() ? "?" : nome),
+                       [this, d] {
+                         estado_.dex = d;
+                         AoTrocarEspecie();
+                       }});
+      ++achados;
+    }
+    if (itens.empty()) return;
+    ShowContextMenu(ancora, std::move(itens));
+  }
+
+  void AbrirListaNatureza(brls::Rect ancora) {
+    std::vector<std::pair<std::string, std::function<void()>>> itens;
+    for (std::uint8_t n = 0; n < 25; ++n) {
+      itens.push_back({g3::NatureName(n), [this, n] {
+                         estado_.nature = n;
+                         Atualizar();
+                       }});
+    }
+    ShowContextMenu(ancora, std::move(itens));
+  }
+
+  void AbrirListaHabilidade(brls::Rect ancora) {
+    const auto* pe = gen::PersonalOf(estado_);
+    if (!pe) return;
+    std::vector<std::pair<std::string, std::function<void()>>> itens;
+    const std::uint8_t slots[3] = {1, 2, 4};
+    const std::uint16_t ids[3] = {pe->ability1, pe->ability2,
+                                  pe->ability_hidden};
+    for (int i = 0; i < 3; ++i) {
+      if (ids[i] == 0) continue;  // a especie nao tem esse slot
+      // Slot 2 igual ao 1 e como a tabela representa "so tem uma
+      // habilidade" — listar duas vezes confundiria.
+      if (i == 1 && ids[1] == ids[0]) continue;
+      std::string nome = ids[i] < pokehome::modern::kAbilityCount
+                             ? pokehome::modern::kAbilityNames[ids[i]]
+                             : "?";
+      if (slots[i] == 4) nome += " (oculta)";
+      const std::uint8_t slot = slots[i];
+      itens.push_back({nome, [this, slot] {
+                         estado_.ability_slot = slot;
+                         Atualizar();
+                       }});
+    }
+    if (itens.empty()) return;
+    ShowContextMenu(ancora, std::move(itens));
+  }
+
+  void AbrirListaBola(brls::Rect ancora) {
+    // As bolas comuns, na ordem em que o jogador as reconhece. A lista curta
+    // e deliberada: bola exotica quase sempre e escolha errada de origem, e o
+    // verificador ja acusa a anacronica.
+    static const std::uint8_t kOfertadas[] = {4, 3, 2, 1, 12, 11, 14, 9, 10, 8};
+    std::vector<std::pair<std::string, std::function<void()>>> itens;
+    for (const std::uint8_t b : kOfertadas) {
+      itens.push_back({NomeBola(b), [this, b] {
+                         estado_.ball = b;
+                         Atualizar();
+                       }});
+    }
+    ShowContextMenu(ancora, std::move(itens));
+  }
+
+  void AbrirListaJogo(brls::Rect ancora) {
+    using J = pokehome::personal::Jogo;
+    std::vector<std::pair<std::string, std::function<void()>>> itens;
+    for (int i = 0; i < static_cast<int>(J::kCount); ++i) {
+      const J j = static_cast<J>(i);
+      itens.push_back({NomeJogo(j), [this, j] {
+                         estado_.jogo = j;
+                         AoTrocarJogo();
+                       }});
+    }
+    ShowContextMenu(ancora, std::move(itens));
+  }
+
+  void AbrirListaGolpe(brls::Rect ancora, int slot) {
+    // Os golpes que a especie aprende por nivel ate o nivel atual — a mesma
+    // fonte que o `ApplyFix` usa, entao a lista nunca sugere algo que a
+    // verificacao vai reprovar em seguida.
+    std::vector<std::pair<std::string, std::function<void()>>> itens;
+    itens.push_back({"— vazio —", [this, slot] {
+                       estado_.moves[slot] = 0;
+                       Atualizar();
+                     }});
+    std::uint16_t nivelados[4] = {0, 0, 0, 0};
+    if (const auto* pe = gen::PersonalOf(estado_)) {
+      (void)pe;
+      // MovesAtLevel devolve so os 4 ultimos; para a lista queremos mais, e
+      // por isso a varredura vai nivel a nivel ate o atual.
+      std::vector<std::uint16_t> vistos;
+      for (std::uint8_t lv = 1; lv <= estado_.level; ++lv) {
+        std::uint16_t buf[4] = {0, 0, 0, 0};
+        gen::GolpesAteNivel(estado_, lv, buf);
+        for (const std::uint16_t m : buf) {
+          if (m == 0) continue;
+          if (std::find(vistos.begin(), vistos.end(), m) != vistos.end())
+            continue;
+          vistos.push_back(m);
+        }
+      }
+      for (const std::uint16_t m : vistos) {
+        if (itens.size() >= 14) break;
+        const std::string nome = m < pokehome::modern::kMoveNameCount
+                                     ? pokehome::modern::kMoveNames[m]
+                                     : std::to_string(m);
+        itens.push_back({nome, [this, slot, m] {
+                           estado_.moves[slot] = m;
+                           Atualizar();
+                         }});
+      }
+    }
+    (void)nivelados;
+    ShowContextMenu(ancora, std::move(itens));
+  }
+
+  // Trocar de especie invalida escolhas que dependiam dela.
+  void AoTrocarEspecie() {
+    const auto* pe = gen::PersonalOf(estado_);
+    if (pe) {
+      if (pe->gender == 255) estado_.gender = 2;
+      else if (pe->gender == 254) estado_.gender = 1;
+      else if (pe->gender == 0) estado_.gender = 0;
+      else if (estado_.gender == 2) estado_.gender = 0;
+      if (estado_.ability_slot == 2 && pe->ability2 == 0)
+        estado_.ability_slot = 1;
+      if (estado_.ability_slot == 4 && pe->ability_hidden == 0)
+        estado_.ability_slot = 1;
+    }
+    // O moveset era da especie anterior: reescreve pelo aprendizado de nivel.
+    gen::ApplyFix(estado_, "sem_golpe");
+    Atualizar();
+  }
+
+  // Trocar de jogo muda o formato, o learnset e o encontro do molde.
+  void AoTrocarJogo() {
+    const std::uint8_t enc = gen::MetLevelDoMolde(estado_.jogo);
+    if (enc) {
+      if (estado_.level < enc) estado_.level = enc;
+      estado_.met_level = enc;
+    }
+    AoTrocarEspecie();  // revalida genero/habilidade/golpes no jogo novo
+  }
+
+  void CorrigirCampoFocado() {
+    const std::string code = CorrecaoDoCampoFocado();
+    if (code.empty()) return;
+    if (gen::ApplyFix(estado_, code)) Atualizar();
+  }
+
+  void AbrirVerificacao() {
+    const auto probs = gen::Verify(estado_);
+    if (probs.empty()) {
+      NoticeDialog("Tudo coerente. Este Pokémon poderia existir no jogo de "
+                   "origem escolhido.",
+                   "Entendi");
+      return;
+    }
+    std::string txt;
+    for (const auto& p : probs) {
+      txt += (p.severity == gen::Severity::kErro ? "✕  " : "⚠  ");
+      txt += p.reason + "\n";
+    }
+    // "Corrigir tudo" e o botao perigoso; o seguro (fechar) vem primeiro e
+    // recebe o foco — regra do MessageBox (spec 044).
+    MessageBox::Show(txt, {{"Fechar", nullptr, kGlyphB},
+                           {"Corrigir tudo", [this] { CorrigirTudo(); }, ""}});
+  }
+
+  void CorrigirTudo() {
+    for (int volta = 0; volta < 8; ++volta) {
+      const auto probs = gen::Verify(estado_);
+      bool mudou = false;
+      for (const auto& p : probs) {
+        if (p.fix_label.empty()) continue;
+        if (gen::ApplyFix(estado_, p.code)) {
+          mudou = true;
+          break;  // relista: uma correcao pode mudar o conjunto
+        }
+      }
+      if (!mudou) break;
+    }
+    Atualizar();
+  }
+
+  void TentarCriar() {
+    const auto probs = gen::Verify(estado_);
+    int erros = 0;
+    for (const auto& p : probs)
+      if (p.severity == gen::Severity::kErro) ++erros;
+
+    if (erros == 0) {
+      Criar();
+      return;
+    }
+    // O primeiro botao e o SEGURO e nasce com o foco (spec 044).
+    MessageBox::Show(
+        "Este Pokémon tem " + std::to_string(erros) +
+            (erros > 1 ? " erros" : " erro") +
+            " — é ilegal e pode ser recusado pelo jogo ou pelo Pokémon HOME.\n"
+            "Criar assim mesmo?",
+        {{"Cancelar", nullptr, kGlyphB},
+         {"Criar assim mesmo", [this] { Criar(); }, ""}});
+  }
+
+  void Criar() {
+    std::optional<pkm::Pokemon> mon = gen::Build(estado_);
+    if (!mon) {
+      NoticeDialog("Não foi possível montar este Pokémon.", "Entendi");
+      return;
+    }
+    // TD-06: o gerador NAO serializa por conta propria. Entrega ao MESMO
+    // caminho da transferencia — e por isso que tracker e handler chegam
+    // preenchidos.
+    pkm::AjustesDeEntrada(*mon, mon->format);
+
+    if (!nest_) {
+      NoticeDialog("NestBox indisponível.", "Entendi");
+      return;
+    }
+    const auto vaga = PrimeiraVagaLivre();
+    if (!vaga) {
+      NoticeDialog("A NestBox está cheia.", "Entendi");
+      return;
+    }
+    g3::BoxPokemon bp;
+    bp.modern = std::make_shared<const pkm::Pokemon>(*mon);
+    bp.national_dex = estado_.dex;
+    bp.display_level = estado_.level;
+    bp.display_shiny = estado_.shiny;
+    bp.display_gender = estado_.gender;
+    bp.display_ball = estado_.ball;
+    bp.species_name = NomeEspecie();
+    bp.ot_name = estado_.ot_name;
+    bp.origin_game = mon->origin_game;
+    nest_->Put(vaga->first, vaga->second, bp);
+
+    NoticeDialog(NomeEspecie() + " criado na NestBox.", "Entendi");
+  }
+
+  std::optional<std::pair<std::size_t, std::size_t>> PrimeiraVagaLivre() const {
+    for (std::size_t b = 0; b < nest_->BoxCount(); ++b)
+      for (std::size_t s = 0; s < g3::kSlotsPerBox; ++s)
+        if (nest_->At(b, s).empty()) return std::make_pair(b, s);
+    return std::nullopt;
+  }
+
+  static constexpr const char* kStatNomes[6] = {"HP", "Ataque", "Defesa",
+                                                "Speed", "Sp. Atk", "Sp. Def"};
+  static constexpr const char* kStatCurto[6] = {"HP", "Atk", "Def",
+                                                "Spe", "SpA", "SpD"};
+
+  NestBoxSource* nest_ = nullptr;
+  gen::GeneratorState estado_;
+  gen::Section aba_ = gen::Section::kEspecie;
+  int campo_ = 0;
+  bool ajuste_ = false;
+
+  GenCard* form_ = nullptr;
+  GenCard* hero_ = nullptr;
+  GenCard* detalhe_ = nullptr;
+  std::vector<GenRow*> linhas_;
+  brls::Box* abaBox_[4] = {};
+  brls::Label* abaLabel_[4] = {};
+  brls::Box* seloBox_ = nullptr;
+  brls::Label* selo_ = nullptr;
+  brls::Label* dicas_ = nullptr;
+  brls::Box* criarBtn_ = nullptr;
+  brls::Label* criarLabel_ = nullptr;
 };
 
 // Tela inicial. Layout 01: barra superior, subtitulo que reage ao foco, painel
@@ -10275,6 +12521,29 @@ class MenuActivity : public brls::Activity {
         });
     col->addView(dexButton_);
 
+    // Gerador (spec 144) — ESCONDIDO enquanto a spec esta em pausa.
+    //
+    // O botao existe e funciona (o roteiro `gerador-basico.txt` o exercita),
+    // mas nao aparece no menu: o dono pausou a spec com a tela ainda sem a
+    // conferencia visual dele. Ate la o caminho fica fora do alcance de quem
+    // usa o app.
+    //
+    // Para reativar: veja `GeradorVisivel()`. Nada mais muda — a
+    // tela, o roteiro e o botao continuam inteiros e testados.
+    //
+    // TD-02: sem pilula de contagem — POKEMON e POKEDEX sao os unicos dois
+    // com contador, e o gerador nao tem numero que faca sentido mostrar sem
+    // persistir um contador novo.
+    if (GeradorVisivel()) {
+      genButton_ = new MenuButton(
+          "GERADOR", "", 0,
+          [this] { OpenGenerator(); }, [this] {
+            SetSubtitle(kSubtitleGen);
+            SetPreviewTitle("GERADOR");
+          });
+      col->addView(genButton_);
+    }
+
     // Grade reservada de botoes redondos.
     auto* grid = new brls::Box(brls::Axis::COLUMN);
     grid->setMarginTop(26);
@@ -10366,8 +12635,24 @@ class MenuActivity : public brls::Activity {
     brls::Application::pushActivity(new DexActivity(save_, nest_));
   }
 
+  // Gerador (spec 144). Cria direto na NestBox: nao passa pela selecao de
+  // save, porque o Pokemon nasce no banco e so depois e transferido — o
+  // caminho de deposito da spec 143 continua sendo o unico que escreve save.
+  void OpenGenerator() {
+    // O gerador GRAVA, e gravar e do `NestBoxSource` concreto (`Put`), nao da
+    // interface `BoxSource` — que e so leitura de proposito. O menu guarda o
+    // ponteiro pela interface, entao o cast e onde a diferenca aparece.
+    auto* nest = dynamic_cast<NestBoxSource*>(nest_);
+    if (nest == nullptr) {
+      NoticeDialog("A NestBox não está disponível para gravação.", "Entendi");
+      return;
+    }
+    brls::Application::pushActivity(new GeneratorActivity(nest));
+  }
+
   static constexpr const char* kSubtitlePokemon = "Deposite seus Pokémon";
   static constexpr const char* kSubtitleDex = "Consulte informações";
+  static constexpr const char* kSubtitleGen = "Crie um Pokémon do zero";
 
   BoxSource* nest_;
   BoxSource* save_;
@@ -10377,6 +12662,7 @@ class MenuActivity : public brls::Activity {
   brls::Label* previewTitle_ = nullptr;
   MenuButton* pokemonButton_ = nullptr;
   MenuButton* dexButton_ = nullptr;
+  MenuButton* genButton_ = nullptr;
   brls::Label* versionLabel_ = nullptr;  // "v" + NESTBOX_VERSION (spec 130)
 };
 

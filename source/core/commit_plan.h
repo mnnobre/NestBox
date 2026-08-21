@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include "evolucao_troca.h"
+#include "game_species.h"
 #include "gen3_save.h"
 #include "learnset.h"
 #include "modern_box_view.h"
@@ -61,10 +63,44 @@ struct SaveInfo {
   // 143); vazio deixa o `ht_name` como esta.
   std::string trainer_name;
 
+  // Jogo do save aberto, na granularidade de `game_species.h` (spec 146).
+  //
+  // `jogo_ms` acima nao serve para isto: ele agrupa a familia GBA inteira em
+  // `kGen3`, e o aviso de "nao volta para o jogo de origem" precisa do jogo
+  // exato — Red/Blue perde Slowking, FireRed nao.
+  //
+  // `kCount` = desconhecido: o aviso e omitido em vez de chutar.
+  compat::Game jogo_origem = compat::Game::kCount;
+
   // Alvo da descida, quando `kind == kGen3`.
   learnset::Game learnset_gen3 = learnset::Game::kFireRed;
   // Codigo de origem gen3 (1..5) para a palavra de origins na descida.
   std::uint8_t origem_gen3 = 0;
+};
+
+// Um Pokemon que PODE evoluir por troca ao ser guardado (spec 146).
+//
+// A evolucao por troca nao e estado no registro — e um EVENTO que o jogo
+// dispara durante a troca, e o NestBox escreve direto no save. O jogo nunca
+// reavalia. Sem oferecer aqui, um Haunter guardado fica elegivel para sempre
+// e nunca evolui.
+//
+// DEC-2: a pergunta acontece na SAIDA jogo -> NestBox, nao na entrada de um
+// jogo. Do contrario o dono teria de guardar, mandar para um jogo, e so entao
+// evoluir — um passo a mais sem ganho.
+//
+// Consequencia assumida: aqui NAO existe jogo de destino para consultar,
+// entao `HasSpecies` vira INFORMACAO (quais jogos aceitam o resultado), nao
+// trava. Em 52 casos medidos evoluir impede a volta ao jogo de ORIGEM — e por
+// isso `origem_aceita_alvo` existe: o dialogo avisa em vez de bloquear.
+struct CandidatoEvolucao {
+  std::size_t indice = 0;   // posicao em `Plan::nest_writes`
+  int dex_base = 0;         // quem entra (ex.: 93, Haunter)
+  int dex_alvo = 0;         // quem sai (ex.: 94, Gengar)
+
+  // O jogo de onde ele saiu aceita o EVOLUIDO? Falso = evoluir prende o
+  // Pokemon fora do jogo de origem. Nao impede: avisa.
+  bool origem_aceita_alvo = true;
 };
 
 // O plano: o que executar, ja decidido e convertido.
@@ -83,6 +119,12 @@ struct Plan {
 
   // As mesmas alteracoes no formato do save moderno.
   std::vector<view::BoxChange> modern_changes;
+
+  // Quem pode evoluir por troca ao ser guardado (spec 146). SO e preenchido
+  // no sentido jogo -> NestBox; guardar e a operacao que o jogo leria como
+  // troca. A lista e uma OFERTA: o plano nao evolui ninguem sozinho, quem
+  // aplica e `AplicaEvolucoes` depois da resposta do dono.
+  std::vector<CandidatoEvolucao> candidatos_evolucao;
 
   bool ok() const { return error.empty(); }
   bool touches_save() const {
@@ -109,5 +151,16 @@ void AplicaEntradaNoDestino(pkm::Pokemon& mon, const SaveInfo& save,
 
 Plan BuildPlan(const std::vector<Change>& changes, const SaveInfo& save,
                moveset::Memory* memory);
+
+// Aplica as evolucoes que o dono ACEITOU, mutando `plan.nest_writes`.
+//
+// `aceitos` traz os indices de `plan.candidatos_evolucao` que devem evoluir —
+// os demais entram intactos, que e a garantia de que a pergunta nao altera
+// quem disse nao.
+//
+// Separado de `BuildPlan` de proposito: montar o plano e puro e roda sem
+// interacao; evoluir depende da resposta humana. Juntar os dois obrigaria o
+// BuildPlan a conhecer a UI.
+void AplicaEvolucoes(Plan& plan, const std::vector<std::size_t>& aceitos);
 
 }  // namespace pokehome::commit

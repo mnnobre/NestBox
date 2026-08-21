@@ -138,7 +138,11 @@ std::optional<Pokemon> Convert(const Pokemon& origem, Format destino) {
     p.ribbon_bytes = {};
     p.ribbon_count_memory = 0;
     p.ribbon_count_battle = 0;
-    p.affixed_ribbon = 0;
+    // 0xFF = NENHUMA fita afixada. O 0 nao e "vazio": e a Kalos Champion, e
+    // um Pokemon que nunca viu Kalos sai com ela pendurada — 117 de 117 numa
+    // volta LGPE -> SwSh, com "Invalid Affixed Ribbon: Kalos Champion".
+    // O `make_batch` ja usava 0xFF e comentava isto; a conversao nao.
+    p.affixed_ribbon = 0xFF;
   }
   if (!c.contest) {
     p.contest_stats = {};

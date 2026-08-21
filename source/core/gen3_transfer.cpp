@@ -322,16 +322,39 @@ bool ConvertDown(const pkm::Pokemon& p, learnset::Game dest_learnset,
   for (int i = 0; i < 6; ++i) {
     r.iv32 |= static_cast<std::uint32_t>(p.ivs[i] & 0x1F) << (i * 5);
   }
-  // Slot -> bit: 2 vira bit 1; 1 e hidden (4) caem no bit 0 (TD-D3).
-  if (p.ability_number == 2) r.iv32 |= 1u << 31;
+  // Habilidade: no gen3 NAO ha slot, ha um BIT — e o jogo deriva o slot de
+  // `PID & 1`. Gravar o bit a partir do nosso `ability_number` (a TD-D3
+  // original da spec 110) produz um registro que o verificador reprova com
+  // "Ability does not match PID": 131 de 259 divergiam no lote medido, dos
+  // quais 45 eram acusados (nos outros `ability1 == ability2` e o bit nao
+  // importa).
+  //
+  // TD-D3 REVISTA (spec 149): quem manda e o PID — mas SO quando a especie
+  // tem duas habilidades DISTINTAS. Ivysaur tem ability1 == ability2 == 65;
+  // ligar o bit nele produz `ability_number = 2` numa especie de habilidade
+  // unica, e o verificador troca de queixa para "Ability does not match
+  // ability number" (86 registros, medido ao tentar so o PID).
+  {
+    const auto& pers = gen3::Personal(dex);
+    const bool duas = pers.ability1 != pers.ability2;
+    if (duas && (p.pid & 1u) != 0) r.iv32 |= 1u << 31;
+  }
 
   // Origens: met_level | origem<<7 | bola<<11 | sexo do OT<<15.
   const std::uint8_t origem =
       (p.origin_game >= 1 && p.origin_game <= 5) ? p.origin_game
                                                  : origem_fallback;
   const std::uint8_t bola = (p.ball >= 1 && p.ball <= 12) ? p.ball : 4;
+  // `met_location = 0` no gen3 significa OVO — e ovo nasce no nivel 0. Gravar
+  // o nivel real junto produz o par contraditorio `(met=0, metlv=20)`, que o
+  // verificador reprova. Eram 259 de 259 no lote medido; so o `met_level`
+  // corrigido leva 134 deles a legalidade TOTAL (spec 149).
+  //
+  // Os dois campos andam juntos: enquanto `met_location` for 0 (TD-01 da spec
+  // 109 — nao ha mapa de locais moderno -> gen3), o `met_level` tem de ser 0.
+  const std::uint8_t met_level_g3 = 0;
   r.origins = static_cast<std::uint16_t>(
-      (p.met_level & 0x7F) | (static_cast<std::uint16_t>(origem & 0x0F) << 7) |
+      (met_level_g3 & 0x7F) | (static_cast<std::uint16_t>(origem & 0x0F) << 7) |
       (static_cast<std::uint16_t>(bola & 0x0F) << 11) |
       (static_cast<std::uint16_t>(p.ot_gender & 1) << 15));
   r.met_location = 0;  // TD-01 da spec 109, mesmo criterio

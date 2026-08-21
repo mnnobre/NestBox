@@ -10,6 +10,7 @@
 
 #include "gen3_transfer.h"
 #include "learnset.h"
+#include "lgpe_encontros.h"
 #include "personal_tables.h"
 #include "za_plus_levels.h"
 #include "move_pp.h"
@@ -314,6 +315,64 @@ void AplicaEntradaNoDestino(pkm::Pokemon& mon, const SaveInfo& save,
     }
   }
 
+  // ENTRADA NO LET'S GO — o PB7 nao tem local de transferencia.
+  //
+  // Os outros jogos aceitam um met de "veio do HOME" (30001) ou de origem
+  // anterior (os 59996-60000 do SwSh acima). O Let's Go nao: ele so conhece
+  // encontros NATIVOS e o GO Park, e um registro com met_location=0 reprova
+  // com "Unable to match an encounter from origin game" — medido, 151 de 151
+  // numa rota BDSP -> LGPE.
+  //
+  // Entao o Pokemon que chega passa a apontar para um encontro REAL daquela
+  // especie no jogo de destino: met, nivel e bola do encontro. E o mesmo
+  // padrao que o lote usa desde a spec 147, e o que faz o "Unable to match"
+  // sumir (4 de 5 casos ficaram LEGAIS na sonda P59; o quinto era artefato
+  // da data de teste no futuro).
+  //
+  // TD: isto MENTE sobre onde o Pokemon foi capturado — ele diz ter nascido
+  // no Let's Go. A alternativa era deixar o registro invalido, que o jogo
+  // aceita mas nenhum verificador aprova. O dono escolheu a rota existir
+  // (spec 150), e o README avisa que ela nao alcanca o padrao de
+  // legitimidade das outras.
+  //
+  // Especie sem encontro no LGPE (evolucoes: Ivysaur, Venusaur...) fica como
+  // esta — nao ha encontro a apontar, e inventar um seria pior.
+  if (save.jogo_ms == moveset::Game::kLgpe &&
+      msv::OriginBucket(mon) != moveset::Game::kLgpe) {
+    // O encontro escolhido e o de maior nivel que CABE: met_level acima do
+    // nivel atual reprova com "Current level is below met level".
+    const std::uint8_t nivel_atual =
+        pokehome::species::LevelFromExp(pkm::NationalDex(mon), mon.exp);
+    if (const auto* e =
+            pokehome::lgpe::Acha(pkm::NationalDex(mon), nivel_atual)) {
+      // A versao fica no par: `savew::Game` tem um `kLGPE` so e
+      // `compat::Game` um `kLetsGo` so, entao nao da para saber aqui se o
+      // save e GP ou GE. Nao importa para o veredito — o LGPE e par de
+      // versoes e o verificador aceita encontro de qualquer uma das duas.
+      // ponytail: fixar a versao quando a SaveInfo souber distinguir.
+      mon.origin_game = 42;  // Let's Go, Pikachu! (o par)
+      mon.met_location = e->met;
+      mon.met_level = e->nivel;
+      mon.egg_location = 0;
+      if (mon.ball >= 27) mon.ball = 4;
+
+      // AV de HP e dos demais stats: o LGPE da 1 AV por nivel GANHO, e o
+      // verificador exige `AV >= nivel_atual - met_level` em cada um. A
+      // mesma regra ja existia na subida gen3 (`gen3_transfer.cpp:251`),
+      // mas so la — quem chega dos jogos modernos passava sem AV nenhum e
+      // reprovava com "Defense AV should be greater than 1".
+      //
+      // Preenche o MINIMO: o AV soma direto no stat, entao encher alem
+      // inventaria HP e CP que o Pokemon nao teve.
+      if (nivel_atual > e->nivel) {
+        const std::uint8_t piso =
+            static_cast<std::uint8_t>(nivel_atual - e->nivel);
+        for (auto& av : mon.awakening_values)
+          if (av < piso) av = piso;
+      }
+    }
+  }
+
   // Handler: quem NAO nasceu neste jogo esta sendo SEGURADO, nao e mais o
   // treinador original — `Current handler cannot be the OT` no PkHeX.
   //
@@ -354,6 +413,35 @@ Plan BuildPlan(const std::vector<Change>& changes, const SaveInfo& save,
   if (plan.touches_save() && save.kind == SaveKind::kNenhum) {
     plan.error = "alteracoes no painel do save, mas a fonte nao e gravavel";
     return plan;
+  }
+
+  // Quem pode evoluir por troca ao ser GUARDADO (spec 146, DEC-2).
+  //
+  // So no sentido jogo -> NestBox: guardar e a operacao que o jogo leria como
+  // troca. Isto apenas OFERECE — nada e alterado aqui. Quem aplica e
+  // `AplicaEvolucoes`, depois da resposta do dono.
+  for (std::size_t i = 0; i < plan.nest_writes.size(); ++i) {
+    const g3::BoxPokemon& mon = plan.nest_writes[i].mon;
+    if (mon.empty() || mon.is_egg) continue;  // ovo nao evolui
+
+    // Mesmo padrao de resolucao de dex que a UI usa: fonte moderna traz o
+    // national_dex pronto, gen3 deriva do indice interno.
+    const int dex =
+        mon.national_dex ? mon.national_dex : g3::NationalDex(mon.species);
+    const int alvo = evo::AlvoDaTroca(dex);
+    if (alvo == 0) continue;
+
+    CandidatoEvolucao cand;
+    cand.indice = i;
+    cand.dex_base = dex;
+    cand.dex_alvo = alvo;
+    // O jogo de onde ele saiu aceita o evoluido? Falso em 52 casos medidos —
+    // o dialogo avisa que o Pokemon nao podera voltar. Jogo desconhecido nao
+    // gera aviso: melhor omitir do que chutar.
+    cand.origem_aceita_alvo =
+        save.jogo_origem == compat::Game::kCount ||
+        compat::HasSpecies(save.jogo_origem, alvo);
+    plan.candidatos_evolucao.push_back(cand);
   }
 
   // Conversao entre geracoes no COMMIT (spec 111). O dry-run do drop ja
@@ -472,6 +560,53 @@ Plan BuildPlan(const std::vector<Change>& changes, const SaveInfo& save,
   }
 
   return plan;
+}
+
+void AplicaEvolucoes(Plan& plan, const std::vector<std::size_t>& aceitos) {
+  for (const std::size_t k : aceitos) {
+    if (k >= plan.candidatos_evolucao.size()) continue;
+    const CandidatoEvolucao& cand = plan.candidatos_evolucao[k];
+    if (cand.indice >= plan.nest_writes.size()) continue;
+
+    g3::BoxPokemon& mon = plan.nest_writes[cand.indice].mon;
+    if (mon.empty()) continue;
+
+    // A espécie de exibicao e sempre atualizada: e o que a caixa mostra.
+    mon.national_dex = static_cast<std::uint16_t>(cand.dex_alvo);
+    mon.species_name = g3::SpeciesNameByDex(cand.dex_alvo);
+
+    if (!mon.modern) continue;  // gen3 puro: so a exibicao muda por ora
+
+    pkm::Pokemon copy = *mon.modern;
+    copy.species = static_cast<std::uint16_t>(cand.dex_alvo);
+
+    // O APELIDO so acompanha quem NUNCA foi apelidado. Um Haunter chamado
+    // "Fantasminha" continua "Fantasminha" depois de virar Gengar — e o que
+    // o jogo faz, e mexer nisso apagaria escolha do dono.
+    if (!copy.is_nicknamed) copy.nickname = g3::SpeciesNameByDex(cand.dex_alvo);
+
+    // A HABILIDADE e re-derivada pelo SLOT, nunca copiada como valor: o
+    // Gengar tem outra lista de habilidades que o Haunter, e manter o id cru
+    // produziria uma habilidade que nao casa com slot nenhum. Mesma regra da
+    // entrada no destino (ver "ABILITY re-derivada" acima).
+    if (const auto* e = pokehome::personal::Find(pokehome::personal::Jogo::kSV,
+                                                 cand.dex_alvo, copy.form)) {
+      switch (copy.ability_number) {
+        case 1: copy.ability = e->ability1; break;
+        case 2: copy.ability = e->ability2; break;
+        case 4: copy.ability = e->ability_hidden; break;
+        default: break;
+      }
+    }
+
+    // O `met` NAO muda, de proposito. Um evoluido por troca carrega para
+    // sempre o local onde foi capturado como o estagio anterior — foi assim
+    // que a sonda mediu `legal=True`, e e como se reconhece um de verdade.
+
+    copy.raw = vw::WriteModern(copy);
+    if (copy.raw.empty()) continue;  // falhou: mantem o original intacto
+    mon.modern = std::make_shared<const pkm::Pokemon>(std::move(copy));
+  }
 }
 
 }  // namespace pokehome::commit

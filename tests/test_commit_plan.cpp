@@ -14,6 +14,7 @@
 #include <string>
 
 #include "commit_plan.h"
+#include "game_species.h"
 #include "gen3_save.h"
 #include "gen3_transfer.h"
 #include "moveset_memory.h"
@@ -397,6 +398,133 @@ int main() {
     }
   }
 
+  // ===================================================================
+  // 9) EVOLUCAO POR TROCA (spec 146).
+  //
+  // A pergunta acontece na SAIDA jogo -> NestBox (DEC-2). O plano so OFERECE:
+  // nada evolui sem `AplicaEvolucoes`. O caso mais importante e o de quem
+  // disse NAO — a pergunta nao pode alterar quem recusou.
+  // ===================================================================
+  {
+    // Um Haunter (93) moderno saindo do SwSh para o NestBox.
+    auto haunter = [] {
+      pkm::Pokemon p;
+      p.format = pkm::Format::kPK9;
+      p.species = 93;
+      p.exp = 30000;
+      p.met_level = 31;
+      p.ability_number = 1;
+      p.is_nicknamed = false;
+      g3::BoxPokemon m{};
+      m.species = 93;
+      m.national_dex = 93;
+      m.modern = std::make_shared<const pkm::Pokemon>(p);
+      return m;
+    };
+
+    cmt::SaveInfo swsh;
+    swsh.kind = cmt::SaveKind::kModerno;
+    swsh.formato = pkm::Format::kPK9;
+    swsh.jogo_ms = ms::Game::kSwSh;
+    swsh.jogo_origem = pokehome::compat::Game::kSwordShield;
+
+    {
+      ms::Memory memory;
+      std::vector<cmt::Change> changes = {{true, 0, 0, haunter()}};
+      const cmt::Plan plan = cmt::BuildPlan(changes, swsh, &memory);
+      Check(plan.ok() && plan.candidatos_evolucao.size() == 1,
+            "evolucao: Haunter guardado vira 1 candidato");
+      if (plan.candidatos_evolucao.size() == 1) {
+        const auto& c = plan.candidatos_evolucao[0];
+        Check(c.dex_base == 93 && c.dex_alvo == 94,
+              "evolucao: o candidato aponta Haunter -> Gengar");
+        Check(c.origem_aceita_alvo,
+              "evolucao: SwSh aceita Gengar (sem aviso de prisao)");
+      }
+      Check(plan.nest_writes.size() == 1 &&
+                plan.nest_writes[0].mon.national_dex == 93,
+            "evolucao: BuildPlan apenas OFERECE, nao evolui");
+    }
+
+    {
+      // Quem diz NAO tem de sair identico ao que entrou.
+      ms::Memory memory;
+      std::vector<cmt::Change> changes = {{true, 0, 0, haunter()}};
+      cmt::Plan plan = cmt::BuildPlan(changes, swsh, &memory);
+      const auto antes = plan.nest_writes[0].mon.modern;
+      cmt::AplicaEvolucoes(plan, {});  // ninguem aceito
+      Check(plan.nest_writes[0].mon.national_dex == 93 &&
+                plan.nest_writes[0].mon.modern == antes,
+            "evolucao: recusar deixa o Pokemon byte a byte intacto");
+    }
+
+    {
+      // Aceitar troca a especie — e preserva o met.
+      ms::Memory memory;
+      std::vector<cmt::Change> changes = {{true, 0, 0, haunter()}};
+      cmt::Plan plan = cmt::BuildPlan(changes, swsh, &memory);
+      const int met_antes = plan.nest_writes[0].mon.modern->met_level;
+      cmt::AplicaEvolucoes(plan, {0});
+      const auto& m = plan.nest_writes[0].mon;
+      Check(m.national_dex == 94, "evolucao: aceitar troca a especie para 94");
+      Check(m.modern && m.modern->species == 94,
+            "evolucao: o payload moderno tambem virou Gengar");
+      Check(m.modern && m.modern->met_level == met_antes,
+            "evolucao: o met NAO muda (marca do evoluido por troca)");
+      Check(m.modern && !m.modern->raw.empty(),
+            "evolucao: o registro foi reescrito (raw nao vazio)");
+    }
+
+    {
+      // Sai de um jogo que NAO aceita o evoluido: Porygon existe em Let's Go,
+      // Porygon2 nao. O dialogo avisa; nao bloqueia.
+      pkm::Pokemon p;
+      p.format = pkm::Format::kPK9;
+      p.species = 137;
+      p.exp = 20000;
+      p.ability_number = 1;
+      g3::BoxPokemon m{};
+      m.species = 137;
+      m.national_dex = 137;
+      m.modern = std::make_shared<const pkm::Pokemon>(p);
+
+      cmt::SaveInfo lgpe;
+      lgpe.kind = cmt::SaveKind::kModerno;
+      lgpe.formato = pkm::Format::kPK9;
+      lgpe.jogo_ms = ms::Game::kLgpe;
+      lgpe.jogo_origem = pokehome::compat::Game::kLetsGo;
+
+      ms::Memory memory;
+      std::vector<cmt::Change> changes = {{true, 0, 0, m}};
+      const cmt::Plan plan = cmt::BuildPlan(changes, lgpe, &memory);
+      if (plan.candidatos_evolucao.size() == 1) {
+        Check(!plan.candidatos_evolucao[0].origem_aceita_alvo,
+              "evolucao: Porygon2 nao volta para Let's Go (avisa, nao bloqueia)");
+      } else {
+        Check(false, "evolucao: Porygon guardado vira candidato");
+      }
+    }
+
+    {
+      // Ovo nunca e oferecido.
+      ms::Memory memory;
+      g3::BoxPokemon ovo = haunter();
+      ovo.is_egg = true;
+      std::vector<cmt::Change> changes = {{true, 0, 0, ovo}};
+      const cmt::Plan plan = cmt::BuildPlan(changes, swsh, &memory);
+      Check(plan.candidatos_evolucao.empty(),
+            "evolucao: um ovo de Haunter nao e oferecido");
+    }
+
+    {
+      // O sentido oposto (NestBox -> jogo) nao oferece nada.
+      ms::Memory memory;
+      std::vector<cmt::Change> changes = {{false, 0, 0, haunter()}};
+      const cmt::Plan plan = cmt::BuildPlan(changes, swsh, &memory);
+      Check(plan.candidatos_evolucao.empty(),
+            "evolucao: mandar PARA o jogo nao oferece evolucao (DEC-2)");
+    }
+  }
   if (g_failures == 0) {
     std::printf("\nTodos os testes passaram.\n");
     return 0;

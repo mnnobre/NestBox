@@ -97,6 +97,22 @@ class MoveSession {
 
   bool Holding() const { return held_.has_value(); }
 
+  // Substitui o conteudo de um slot JA alterado nesta sessao (spec 146).
+  //
+  // Existe para a evolucao por troca: quando o dono aceita evoluir, o Pokemon
+  // que acabou de ser solto no NestBox vira o evoluido — ainda no overlay,
+  // sem nada gravado. Trocar aqui e o que faz a caixa mostrar o Gengar na
+  // hora, e o commit gravar o Gengar depois.
+  //
+  // NAO cria alteracao onde nao havia: sem entrada em `changes_` a chamada e
+  // ignorada. Assim isto nao vira uma porta para escrever em slot que o
+  // usuario nao tocou.
+  void Replace(const SlotRef& ref, const Pokemon& mon) {
+    auto it = changes_.find(ref);
+    if (it == changes_.end()) return;
+    it->second = mon;
+  }
+
   // O Pokemon na mao. So chamar com Holding() == true.
   const Pokemon& Held() const { return *held_; }
 

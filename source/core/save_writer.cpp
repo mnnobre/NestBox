@@ -617,6 +617,32 @@ std::vector<std::uint8_t> Save(const SaveData& sd) {
     RepairZeroRecords(out.data() + kLgpeBoxOffset, kLgpeStride, kLgpeStride,
                       sd.box.size(), sd.game);
   }
+
+  // HEADER DA LISTA (spec 148). O Let's Go nao tem caixa fisica: tem uma lista
+  // compactada, e o jogo le deste header quantos registros existem. Gravar o
+  // slot sem atualizar o COUNT deixa o Pokemon INVISIVEL — o PkHeX o enxerga
+  // (ele varre os slots), o jogo nao. Medido no console: 122 slots ocupados
+  // com COUNT=1, e a caixa apareceu vazia.
+  //
+  //   0x00..0x0B  6 indices de party (u16); 1001 = vazio
+  //   0x0C        STARTER (u16) — indice do parceiro
+  //   0x0E        COUNT   (u32) — quantos Pokemon a lista tem
+  //
+  // Party e STARTER sao do JOGADOR e ficam como estao. So o COUNT e nosso.
+  if (touched) {
+    std::size_t ocupados = 0;
+    for (std::size_t i = 0; i < sd.box.size(); ++i) {
+      const std::uint8_t* rec = out.data() + kLgpeBoxOffset + i * kLgpeStride;
+      // Especie no offset 8 do PB7; 0 = slot vazio. Ler do buffer de SAIDA e
+      // deliberado: e o que o jogo vai ler, nao o que pedimos para gravar.
+      if (static_cast<std::uint16_t>(rec[8] | (rec[9] << 8)) != 0) ++ocupados;
+    }
+    std::uint8_t* hdr = out.data() + kLgpeHeaderOffset;
+    hdr[0x0E] = static_cast<std::uint8_t>(ocupados & 0xFF);
+    hdr[0x0F] = static_cast<std::uint8_t>((ocupados >> 8) & 0xFF);
+    hdr[0x10] = static_cast<std::uint8_t>((ocupados >> 16) & 0xFF);
+    hdr[0x11] = static_cast<std::uint8_t>((ocupados >> 24) & 0xFF);
+  }
   // Patches da bag (spec 072). No LGPE ela esta em claro no arquivo e tem
   // CHECKSUM PROPRIO, recalculado logo abaixo — sem isso o save fica
   // corrompido de um jeito que o PkHeX NAO acusa na leitura.

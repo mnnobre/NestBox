@@ -270,6 +270,23 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  // Caixa 0, slot 5: HAUNTER, para a evolucao por troca (spec 146).
+  //
+  // Haunter (dex 93) e o caso da spec: so evolui sendo trocado, que e
+  // exatamente o que o NestBox faz ao guardar. FireRed tem Haunter E Gengar,
+  // entao este e o caso SEM aviso — o par que evolui limpo.
+  //
+  // 93 tambem e o indice interno no gen3 (a numeracao interna coincide com a
+  // dex ate 251 para as especies de Kanto/Johto). Conferido com
+  // g3::InternalFromDex(93) na sonda.
+  g3::FullRecord haunter = MakeMon(g3::InternalFromDex(93), 135, "HAUNTER");
+  std::uint8_t rec6[80] = {};
+  g3::EncodeFullRecord(haunter, rec6);
+  if (!g3::WriteBoxPokemonTo(pc, 0, 5, rec6)) {
+    std::fprintf(stderr, "falha ao escrever o slot 5\n");
+    return 1;
+  }
+
   if (!g3::ApplyPcBuffer(file, *save, pc)) {
     std::fprintf(stderr, "falha ao aplicar o PC buffer\n");
     return 1;

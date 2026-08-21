@@ -4,7 +4,7 @@ project(pokehome C CXX)
 
 # Versao do app. Deve casar com a tag da release no GitHub — e o que o
 # auto-update compara. Ao publicar uma release nova, subir aqui tambem.
-set(NESTBOX_VERSION "0.9.15")
+set(NESTBOX_VERSION "0.9.16")
 # Repo publico so de releases — o codigo vive no repo privado mnnobre/NestBox.
 set(NESTBOX_REPO "mnnobre/NestBox")
 
@@ -266,6 +266,11 @@ add_test(NAME nestbox_ab COMMAND test_nestbox_ab)
 add_executable(test_game_species tests/test_game_species.cpp)
 target_link_libraries(test_game_species PRIVATE pokehome_core)
 add_test(NAME game_species COMMAND test_game_species)
+
+# Tabela de evolucao por troca, gerada da EvolutionTree do PkHeX (spec 146).
+add_executable(test_evolucao_troca tests/test_evolucao_troca.cpp)
+target_link_libraries(test_evolucao_troca PRIVATE pokehome_core)
+add_test(NAME evolucao_troca COMMAND test_evolucao_troca)
 
 # Tabelas de dado extraidas do PkHeX (spec 065): conversao de especie do
 # gen9, learnset por nivel de PLA/BDSP e especies por jogo. A conversao e

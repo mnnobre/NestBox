@@ -61,6 +61,15 @@ que se pareça com o Pokémon HOME oficial.
   Sai de um lado, entra no outro. Escrita no save com backup automático antes.
 - **Bloqueio de incompatibilidade** — como o HOME, um Pokémon só se move para
   um jogo se a espécie existir naquele título.
+- **Evolução por troca** — Haunter, Machoke, Kadabra e companhia evoluem ao
+  serem guardados no NestBox, como evoluiriam numa troca de verdade. O app
+  pergunta antes: a evolução é definitiva, e em alguns casos impede a volta ao
+  jogo de origem.
+- **Judge de IVs** na tela de detalhe — o rótulo do avaliador ("Perfeito",
+  "Fantástico", "Muito bom"...) ao lado de cada stat, lendo o IV real.
+- **Ribbons preservadas** — uma fita conquistada viaja junto e nunca é
+  apagada, mesmo quando o jogo de destino não a reconhece. A história do
+  Pokémon é dele.
 - **Tela de Summary** no formato do HOME oficial, barra de status com dados
   modernos, commit explícito sem janela de perda.
 - **Backup e restauração de saves** antes de qualquer escrita.
@@ -141,6 +150,19 @@ de raid, dois ovos de nível 1), não das rotas.
 - [x] Mecânicas que viajam junto: tera type derivado na entrada do
       Scarlet/Violet, habilidade oculta re-derivada por jogo, item segurado
       devolvido, forma revertida quando depende de item (Giratina Origin)
+- [x] Evolução por troca ao guardar no NestBox, com confirmação e aviso de
+      quando a evolução tranca a volta ao jogo de origem
+- [x] Judge de IVs por stat na tela de detalhe
+- [x] **Let's Go: a caixa agora mostra o que foi transferido.** O save do
+      Let's Go não tem caixas — tem uma lista compactada com um header
+      próprio, e sem atualizá-lo o jogo desenhava a caixa **vazia** mesmo com
+      os Pokémon gravados
+- [x] Entrada no Let's Go casa com um encontro real do jogo, em vez de deixar
+      o local de captura em branco
+- [x] Descida para FireRed/LeafGreen grava nível de encontro e habilidade
+      pelas regras do gen3 (de 0 para 167 de 259 aprovados pelo PkHeX)
+- [x] Correção da fita afixada: quem saía do Let's Go vinha com uma Kalos
+      Champion pendurada sem nunca ter visto Kalos
 
 ### Em desenvolvimento — bugs são esperados
 
@@ -173,6 +195,25 @@ derivado na entrada, habilidade oculta re-derivada por jogo, item devolvido,
 forma revertida quando depende de item segurado. E cada uma dessas regras foi
 **medida** contra o comportamento oficial, nunca deduzida.
 
+**Duas rotas não alcançam esse padrão, e é justo dizer quais.** O NestBox as
+permite por escolha — o HOME oficial não permite nenhuma das duas:
+
+- **Enviar para o Let's Go, Pikachu!/Eevee!** No mundo real o Let's Go só
+  recebe do Pokémon GO, então parte dos transferidos não casa com nenhum
+  encontro que exista lá.
+- **Descer para FireRed/LeafGreen.** O gen3 não tem os campos que as gerações
+  modernas exigem.
+
+Nos dois casos o Pokémon **funciona no jogo** — as duas rotas foram
+verificadas no console real. E o que é apontado como irregular lá **deixa de
+ser na volta**: um Pokémon que passa pelo Let's Go e retorna para o
+Sword/Shield volta aprovado, porque o NestBox guarda o que o jogo antigo não
+sabe guardar.
+
+Faz sentido: um Pokémon de geração nova que desce para uma antiga parece
+irregular *pela ótica do jogo antigo*, que não conhece metade dos campos
+dele. Quem o vê de cima — o HOME, os jogos modernos — vê o registro completo.
+
 ### Próximas versões
 
 - [ ] **Pokédex completa, separada por jogo** — regiões, formas e variantes,
@@ -181,7 +222,6 @@ forma revertida quando depende de item segurado. E cada uma dessas regras foi
       dos que você guardou, sem misturar as duas coisas
 - [ ] Troca manual de golpes ao transferir (escolher entre golpes já
       aprendidos — o app hoje só restaura automaticamente pela memória)
-- [ ] Judge (avaliação de IVs)
 
 ### Criação de Pokémon no console — existe, mas não é o foco
 
