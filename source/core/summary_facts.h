@@ -118,6 +118,9 @@ inline std::string BuildMemo(bool fateful, std::uint8_t origin_game,
 // do hexágono, a ~163px do centro, e uma frase longa invade o rótulo do stat
 // vizinho. A frase inteira do avaliador ("não dá pra ser pior") não cabe.
 inline const char* JudgeIvText(std::uint8_t iv) {
+  // O acento fica: cheguei a tirar suspeitando do atlas de fontes, e o crash
+  // do summary CONTINUOU — a causa era o buffer de comandos do deko3d
+  // (`DynamicCmdSize`), nao o glifo.
   if (iv == 31) return "Perfeito";
   if (iv >= 30) return "Fantástico";
   if (iv >= 26) return "Muito bom";

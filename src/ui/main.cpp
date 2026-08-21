@@ -5166,7 +5166,6 @@ class SummaryContent : public brls::Box {
     nvgClosePath(vg);
     nvgFillColor(vg, nvgRGBA(255, 255, 255, 46));
     nvgFill(vg);
-
     // --- Header branco (0-58) ----------------------------------------------
     nvgBeginPath(vg);
     nvgRect(vg, x, y, w, 58.0f);
@@ -5194,7 +5193,6 @@ class SummaryContent : public brls::Box {
     nvgBeginPath(vg);
     nvgCircle(vg, x + 1244.0f, y + 46.0f, 13.0f);
     nvgFill(vg);
-
     // --- Faixa de navegacao (58-122) ---------------------------------------
     nvgBeginPath(vg);
     nvgRect(vg, x, y + 58.0f, w, 64.0f);
@@ -5229,7 +5227,6 @@ class SummaryContent : public brls::Box {
     nvgRect(vg, bar_x, bar_y, bar_w * frac, 6.0f);
     nvgFillColor(vg, kSumUnderOn);
     nvgFill(vg);
-
     // --- Tag de idioma ------------------------------------------------------
     if (!lang_.empty()) {
       nvgBeginPath(vg);
@@ -5244,7 +5241,6 @@ class SummaryContent : public brls::Box {
     }
 
     DrawRadar(vg, x + 258.0f, y + 341.0f, 118.0f);
-
     // --- Tabela Nature/Ability/Held Item ------------------------------------
     {
       const float tx = x + 48.0f, ty = y + 565.0f, tw = 418.0f, th = 111.0f;
@@ -5274,7 +5270,6 @@ class SummaryContent : public brls::Box {
              NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, *values[r]);
       }
     }
-
     // --- Cartao de golpes ---------------------------------------------------
     {
       const float cx0 = x + 508.0f, cy0 = y + 175.0f, cw = 372.0f;
@@ -5321,7 +5316,6 @@ class SummaryContent : public brls::Box {
     nvgRect(vg, x + 850.0f, y + 120.0f, 380.0f, 370.0f);
     nvgFillPaint(vg, glow);
     nvgFill(vg);
-
     // --- Marcacoes ----------------------------------------------------------
     nvgBeginPath(vg);
     nvgRoundedRect(vg, x + 952.0f, y + 463.0f, 316.0f, 42.0f, 8.0f);
@@ -5334,11 +5328,9 @@ class SummaryContent : public brls::Box {
                               : v == 2 ? kSumMarkPink : kSumMarkOff);
       MarkStrip::DrawMark(vg, i, x + 985.0f + 52.0f * i, y + 484.0f, 11.0f);
     }
-
     // --- Barras OT / ID No. -------------------------------------------------
     DrawIdBar(vg, x + 508.0f, y + 516.0f, 339.0f, 112.0f, "OT", ot_);
     DrawIdBar(vg, x + 855.0f, y + 516.0f, 400.0f, 133.0f, "ID No.", id_);
-
     // --- Memo ---------------------------------------------------------------
     {
       const float mx = x + 508.0f, my = y + 565.0f;
@@ -5361,7 +5353,6 @@ class SummaryContent : public brls::Box {
       Text(vg, mx + 16.0f, my + 95.0f, 22.5f, kSumText,
            NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE, characteristic_);
     }
-
     // --- Rodape -------------------------------------------------------------
     // Sem a barra branca de largura inteira: no app, o branco e SO a pilula
     // do Ajuda, como nas outras telas (dono, 2026-08-17). A legenda desenha
@@ -5534,10 +5525,9 @@ class SummaryContent : public brls::Box {
         {"Sp. Def", -163.0f, 84.0f, -163.0f, 117.0f, 5},
         {"Sp. Atk", -164.0f, -84.0f, -164.0f, -51.0f, 4},
     };
-    // O JUDGE e POR STAT, nao pelo total (correcao do dono, 2026-08-21): o
-    // avaliador do jogo da um rotulo a cada IV, e o lugar dele e junto do
-    // stat correspondente. `l.axis` ja e o indice do save (HP, Atk, Def, Spe,
-    // SpA, SpD), a mesma ordem do vetor de IVs.
+    // O JUDGE e POR STAT (correcao do dono, 2026-08-21): o avaliador do jogo
+    // da um rotulo a cada IV, junto do stat correspondente. `l.axis` ja e o
+    // indice do save (HP, Atk, Def, Spe, SpA, SpD), a ordem do vetor de IVs.
     const std::uint8_t* ivs =
         mon_.modern ? mon_.modern->ivs.data() : mon_.ivs;
     for (const auto& l : kLabels) {
@@ -5545,11 +5535,9 @@ class SummaryContent : public brls::Box {
       Text(vg, cx + l.vx, cy + l.vy, 26.0f, kSumText,
            NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE,
            std::to_string(stats_.values[l.axis]));
-      // O judge fica do lado OPOSTO ao rotulo do stat. As ancoras da captura
-      // nao seguem "rotulo em cima" uniformemente: em Defense e Sp. Def o
-      // rotulo esta ACIMA do valor (ly=84 < vy=117), em Speed esta ABAIXO
-      // (ly=167 > vy=132). Assumir um lado fixo sobrepos "Sp. Def" e
-      // "Regular" — visto na tela pelo dono.
+      // O judge fica do lado OPOSTO ao rotulo do stat: as ancoras da captura
+      // nao seguem "rotulo em cima" uniformemente (Defense e Sp. Def tem o
+      // rotulo ACIMA do valor; Speed, abaixo).
       const float dy = (l.ly < l.vy) ? 26.0f : -26.0f;
       Text(vg, cx + l.vx, cy + l.vy + dy, 18.0f, kSumJudge,
            NVG_ALIGN_CENTER | NVG_ALIGN_MIDDLE,

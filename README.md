@@ -163,8 +163,9 @@ de raid, dois ovos de nível 1), não das rotas.
       pelas regras do gen3 (de 0 para 167 de 259 aprovados pelo PkHeX)
 - [x] Correção da fita afixada: quem saía do Let's Go vinha com uma Kalos
       Champion pendurada sem nunca ter visto Kalos
-- [x] **Correção de crash:** abrir o detalhe de um Pokémon recém-evoluído
-      fechava o app
+- [x] **Correção de crash:** abrir a tela de detalhe fechava o app no console
+      — o buffer de comandos do backend gráfico estourava na tela mais densa
+      em texto
 
 ### Em desenvolvimento — bugs são esperados
 
