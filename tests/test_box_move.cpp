@@ -39,7 +39,10 @@ class FakeSource {
     data_[{id_, box, slot}] = p;
   }
 
-  const bx::Pokemon& At(const bx::SlotRef& ref) const {
+  // Devolve por VALOR, como o `BoxSource::At()` de verdade (main.cpp:1058).
+  // Enquanto isto devolvia referencia, a suite nao reproduzia a condicao do
+  // crash da spec 151: o temporario que morre e a razao do use-after-free.
+  bx::Pokemon At(const bx::SlotRef& ref) const {
     auto it = data_.find(ref);
     return it == data_.end() ? empty_ : it->second;
   }
@@ -63,9 +66,44 @@ class FakeSource {
 };
 
 // Atalho: conteudo efetivo de um slot (fonte + overlay).
-const bx::Pokemon& Eff(const bx::MoveSession& s, const FakeSource& src,
-                       const bx::SlotRef& ref) {
+bx::Pokemon Eff(const bx::MoveSession& s, const FakeSource& src,
+                const bx::SlotRef& ref) {
   return s.Get(ref, src.At(ref));
+}
+
+// O crash do console (2026-08-21): `Get` ligado ao temporario de `At()`.
+//
+// `auto mon = session.Get(ref, fonte->At(...))` — se `Get` devolvesse
+// referencia, o `original` morreria no fim da expressao e o chamador leria
+// memoria liberada. So acontece com slot SEM alteracao pendente: com
+// alteracao, a referencia aponta para `changes_`, que sobrevive. Foi por isso
+// que "evoluir e abrir o detalhe" quebrava e "fechar e reabrir" resolvia.
+//
+// AVISO ao ler este teste: ele NAO falha com o defeito plantado de volta —
+// medido. `auto mon = ...` copia dentro da mesma expressao completa, e o UB
+// nao se manifesta neste caso simples. O teste documenta o CONTRATO (Get
+// devolve valor utilizavel mesmo sem alteracao pendente); a prova do bug foi
+// o relato do console mais a leitura do codigo, nao o vermelho daqui.
+void TestGetNaoPrendeTemporario() {
+  std::printf("get nao prende temporario:\n");
+  FakeSource save(1, true);
+  save.Put(0, 0, 25);
+  bx::MoveSession s;
+  const bx::SlotRef ref{1, 0, 0};   // id da fonte = 1, como no FakeSource
+
+  // sem alteracao pendente: o caminho que quebrava
+  auto mon = s.Get(ref, save.At(ref));
+  Check(mon.species == 25, "sem alteracao: le a fonte (25)");
+
+  // com alteracao pendente: continua valendo. Pegar e soltar noutro slot
+  // deixa `changes_` preenchido nos dois.
+  const bx::SlotRef destino{1, 0, 1};
+  s.Pick(ref, save.At(ref));
+  s.Drop(destino, save.At(destino), true);
+  auto movido = s.Get(destino, save.At(destino));
+  Check(movido.species == 25, "com alteracao: le o overlay (25 no destino)");
+  auto vazio = s.Get(ref, save.At(ref));
+  Check(vazio.species == 0, "a origem ficou vazia no overlay");
 }
 
 void TestPick() {
@@ -424,12 +462,10 @@ void TestCount() {
   save.Put(0, 1, 6);
   bx::MoveSession s;
 
-  auto save_at = [&save](const bx::SlotRef& r) -> const bx::Pokemon& {
-    return save.At(r);
-  };
-  auto nest_at = [&nest](const bx::SlotRef& r) -> const bx::Pokemon& {
-    return nest.At(r);
-  };
+  // Por VALOR: `At()` devolve temporario, e devolver referencia a ele deixa
+  // uma pendurada (o mesmo defeito da spec 151, aqui no proprio teste).
+  auto save_at = [&save](const bx::SlotRef& r) { return save.At(r); };
+  auto nest_at = [&nest](const bx::SlotRef& r) { return nest.At(r); };
 
   Check(s.Count(1, save.Count(), save_at) == 2, "save comeca com 2");
   Check(s.Count(0, nest.Count(), nest_at) == 0, "nestbox comeca com 0");
@@ -767,6 +803,7 @@ int main() {
   TestCicloDeModos();
   TestModoMoverNaoTroca();
   TestModoTrocarTroca();
+  TestGetNaoPrendeTemporario();
 
   if (g_failures > 0) {
     std::printf("\n%d teste(s) falharam.\n", g_failures);

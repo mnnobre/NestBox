@@ -90,7 +90,25 @@ class MoveSession {
  public:
   // Conteudo efetivo de um slot: a alteracao pendente, se houver; senao o que
   // a fonte original tem.
-  const Pokemon& Get(const SlotRef& ref, const Pokemon& original) const {
+  //
+  // Devolve por VALOR, nao por referencia. `BoxSource::At()` devolve um
+  // TEMPORARIO, e a chamada natural e
+  //
+  //     auto mon = session.Get(ref, fonte->At(box, slot));
+  //
+  // Com retorno por referencia, o `original` morre no fim da expressao e o
+  // chamador copia de memoria liberada quando o slot NAO tem alteracao
+  // pendente.
+  //
+  // Foi o crash que o dono relatou NO CONSOLE em 2026-08-21: mover um Haunter
+  // para o NestBox, evoluir e abrir o detalhe fechava o app; fechar e reabrir
+  // "resolvia", porque ai a leitura vinha da fonte sem passar por aqui.
+  //
+  // A copia e barata perto de um use-after-free. E ele NAO reproduz em
+  // qualquer maquina: depende de o alocador reusar a memoria liberada, e isso
+  // muda entre Switch, emulador e PC. Nao adianta procurar um teste que falhe
+  // aqui — o `ctest` passava com o defeito no lugar.
+  Pokemon Get(const SlotRef& ref, const Pokemon& original) const {
     auto it = changes_.find(ref);
     return it == changes_.end() ? original : it->second;
   }
