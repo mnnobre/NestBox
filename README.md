@@ -181,6 +181,34 @@ E vale o de sempre com qualquer ferramenta que escreve em save: **faça backup
 antes**. O app cria um automaticamente, mas uma cópia sua fora do cartão é o
 que protege contra o caso que ninguém previu.
 
+### Evolução por troca — sem precisar de ninguém do outro lado
+
+Gengar, Machamp, Alakazam, Golem, Steelix, Scizor, Kingdra, Slowking. Todos
+esses só evoluem **sendo trocados com outro jogador**. Nível não resolve,
+pedra não resolve, amizade não resolve: sem uma troca, aquele Haunter
+continua Haunter para sempre.
+
+E aí está o problema de quem roda homebrew: **desbloquear o console fecha o
+online**. Sem online não há troca, e sem troca essas espécies ficam
+inalcançáveis — a não ser por mods, que reescrevem o jogo.
+
+O NestBox resolve isso pelo caminho de dentro. Ao guardar um desses Pokémon,
+o app pergunta se você quer evoluí-lo, e o registro que sai é o de um
+evoluído por troca de verdade: o local de captura **não muda** (um Gengar
+legítimo carrega para sempre onde foi pego como Haunter) e o campo de
+treinador que a troca preenche fica preenchido. Foi assim que a mecânica foi
+medida contra o PkHeX antes de virar código.
+
+**São 22 espécies**, cobrindo de Kadabra a Gourgeist. A pergunta aparece uma
+vez, ao guardar, e a resposta é sua — a evolução é definitiva, e o app avisa
+quando ela impede a volta ao jogo de origem (Machamp não existe no
+Scarlet/Violet, por exemplo, e evoluir ali tranca o Machoke fora de casa).
+
+Uma nota sobre o item: Rhydon, Scyther e outros precisam de um item segurado
+para evoluir na troca real. O NestBox não exige — o item nunca viaja na
+transferência, então cobrá-lo seria pedir uma condição que o próprio fluxo
+desfaz.
+
 ### Legitimidade é o foco do projeto
 
 Esta é a decisão que mais custou horas de desenvolvimento, e ela orienta todo
